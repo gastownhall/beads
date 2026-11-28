@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"runtime"
@@ -8,6 +9,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -38,10 +41,29 @@ Examples:
 	RunE:          runShip,
 }
 
+type capabilityShipStore interface {
+	GetIssuesByLabel(context.Context, string) ([]*types.Issue, error)
+	GetLabels(context.Context, string) ([]string, error)
+	AddLabel(context.Context, string, string, string) error
+}
+
+// proxiedCapabilityShipStore reads through the caller's unit of work and adds
+// the provides: label with the guarded issue updater, inside the same
+// transaction.
+type proxiedCapabilityShipStore struct{ uowMolReader }
+
+func (s proxiedCapabilityShipStore) AddLabel(ctx context.Context, id, label, actor string) error {
+	_, err := s.uw.IssueUseCase().ApplyUpdate(ctx, id, domain.UpdateSpec{AddLabels: []string{label}}, actor)
+	return err
+}
+
+type capabilityShipment struct {
+	status  string
+	issue   *types.Issue
+	matches []*types.Issue
+}
+
 func runShip(cmd *cobra.Command, args []string) error {
-	if usesProxiedServer() {
-		return HandleErrorRespectJSON("ship is not supported in proxied-server mode")
-	}
 	CheckReadonly("ship")
 
 	evt := metrics.NewCommandEvent("ship")
@@ -55,99 +77,117 @@ func runShip(cmd *cobra.Command, args []string) error {
 	force, _ := cmd.Flags().GetBool("force")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 
-	ctx := rootCtx
+	var result capabilityShipment
+	var err error
+	if usesProxiedServer() {
+		result, err = uow.RunTxResult(rootCtx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (capabilityShipment, string, error) {
+			result, err := shipCapability(ctx, proxiedCapabilityShipStore{uowMolReader{uw: uw}}, capability, force, dryRun)
+			message := ""
+			if err == nil && result.status == "shipped" {
+				message = "bd: ship " + capability + " on " + result.issue.ID
+			}
+			return result, message, err
+		})
+	} else {
+		result, err = shipCapability(rootCtx, store, capability, force, dryRun)
+	}
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	if result.status == "shipped" {
+		commandDidWrite.Store(true)
+	}
+	return reportCapabilityShipment(capability, result)
+}
 
+// shipCapability applies the same selection and publication rules on both
+// routes. A proxied caller owns the surrounding transaction, so nothing is
+// printed here: all output waits until that attempt has committed.
+func shipCapability(ctx context.Context, s capabilityShipStore, capability string, force, dryRun bool) (capabilityShipment, error) {
+	issues, err := s.GetIssuesByLabel(ctx, "export:"+capability)
+	if err != nil {
+		return capabilityShipment{}, fmt.Errorf("listing issues: %w", err)
+	}
+	if len(issues) == 0 {
+		return capabilityShipment{status: "not_found"}, nil
+	}
+	if len(issues) > 1 {
+		return capabilityShipment{status: "ambiguous", matches: issues}, nil
+	}
+	result := capabilityShipment{issue: issues[0]}
+	if result.issue.Status != types.StatusClosed && !force {
+		result.status = "not_closed"
+		return result, nil
+	}
+	labels, err := s.GetLabels(ctx, result.issue.ID)
+	if err != nil {
+		return capabilityShipment{}, fmt.Errorf("getting labels: %w", err)
+	}
+	for _, label := range labels {
+		if label == "provides:"+capability {
+			result.status = "already_shipped"
+			return result, nil
+		}
+	}
+	if dryRun {
+		result.status = "dry_run"
+		return result, nil
+	}
+	if err := s.AddLabel(ctx, result.issue.ID, "provides:"+capability, currentActor()); err != nil {
+		return capabilityShipment{}, fmt.Errorf("adding label: %w", err)
+	}
+	result.status = "shipped"
+	return result, nil
+}
+
+func reportCapabilityShipment(capability string, result capabilityShipment) error {
 	exportLabel := "export:" + capability
 	providesLabel := "provides:" + capability
-
-	var issues []*types.Issue
-	var err error
-
-	issues, err = store.GetIssuesByLabel(ctx, exportLabel)
-	if err != nil {
-		return HandleErrorRespectJSON("listing issues: %v", err)
-	}
-
-	if len(issues) == 0 {
+	switch result.status {
+	case "not_found":
 		return HandleErrorWithHintRespectJSON(
 			fmt.Sprintf("no issue found with label '%s'", exportLabel),
 			labelAddCommand(exportLabel))
-	}
-
-	if len(issues) > 1 {
+	case "ambiguous":
 		fmt.Fprintf(os.Stderr, "Error: multiple issues found with label '%s':\n", exportLabel)
-		for _, issue := range issues {
+		for _, issue := range result.matches {
 			fmt.Fprintf(os.Stderr, "  %s: %s (%s)\n", issue.ID, issue.Title, issue.Status)
 		}
 		return HandleErrorRespectJSON("only one issue should have this label")
-	}
-
-	issue := issues[0]
-
-	if issue.Status != types.StatusClosed && !force {
+	case "not_closed":
 		return HandleErrorWithHintRespectJSON(
-			fmt.Sprintf("issue %s is not closed (status: %s)", issue.ID, issue.Status),
+			fmt.Sprintf("issue %s is not closed (status: %s)", result.issue.ID, result.issue.Status),
 			"close the issue first, or use --force to override")
 	}
 
-	hasProvides := false
-	labels, err := store.GetLabels(ctx, issue.ID)
-	if err != nil {
-		return HandleErrorRespectJSON("getting labels: %v", err)
-	}
-	for _, l := range labels {
-		if l == providesLabel {
-			hasProvides = true
-			break
-		}
-	}
-
-	if hasProvides {
-		if jsonOutput {
-			return outputJSON(map[string]interface{}{
-				"status":     "already_shipped",
-				"capability": capability,
-				"issue_id":   issue.ID,
-			})
-		}
-		fmt.Printf("%s Capability '%s' already shipped (%s)\n",
-			ui.RenderPass("✓"), capability, issue.ID)
-		return nil
-	}
-
-	if dryRun {
-		if jsonOutput {
-			return outputJSON(map[string]interface{}{
-				"status":     "dry_run",
-				"capability": capability,
-				"issue_id":   issue.ID,
-				"would_add":  providesLabel,
-			})
-		}
-		fmt.Printf("%s Would ship '%s' on %s (dry run)\n",
-			ui.RenderAccent("→"), capability, issue.ID)
-		return nil
-	}
-
-	if err := store.AddLabel(ctx, issue.ID, providesLabel, currentActor()); err != nil {
-		return HandleErrorRespectJSON("adding label: %v", err)
-	}
-
-	commandDidWrite.Store(true)
-
 	if jsonOutput {
-		return outputJSON(map[string]interface{}{
-			"status":     "shipped",
+		value := map[string]interface{}{
+			"status":     result.status,
 			"capability": capability,
-			"issue_id":   issue.ID,
-			"label":      providesLabel,
-		})
+			"issue_id":   result.issue.ID,
+		}
+		switch result.status {
+		case "dry_run":
+			value["would_add"] = providesLabel
+		case "shipped":
+			value["label"] = providesLabel
+		}
+		return outputJSON(value)
 	}
-	fmt.Printf("%s Shipped %s (%s)\n",
-		ui.RenderPass("✓"), capability, issue.ID)
-	fmt.Printf("  Added label: %s\n", providesLabel)
-	fmt.Printf("\nExternal projects can now depend on: external:%s:%s\n",
-		"<this-project>", capability)
+	switch result.status {
+	case "already_shipped":
+		fmt.Printf("%s Capability '%s' already shipped (%s)\n",
+			ui.RenderPass("✓"), capability, result.issue.ID)
+	case "dry_run":
+		fmt.Printf("%s Would ship '%s' on %s (dry run)\n",
+			ui.RenderAccent("→"), capability, result.issue.ID)
+	case "shipped":
+		fmt.Printf("%s Shipped %s (%s)\n",
+			ui.RenderPass("✓"), capability, result.issue.ID)
+		fmt.Printf("  Added label: %s\n", providesLabel)
+		fmt.Printf("\nExternal projects can now depend on: external:%s:%s\n",
+			"<this-project>", capability)
+	}
 	return nil
 }
 
