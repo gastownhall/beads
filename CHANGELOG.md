@@ -2061,6 +2061,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rolled-back ID. When the transaction rolled back they are now empty again;
   an error wrapping `storage.ErrCommitIndeterminate` keeps them. `bd create`
   was not affected.
+- **`bd dep add` no longer tells you a child already waits for its parent
+  (#5036).** Refusing a `blocks` edge from a dotted child such as `P.1` onto
+  `P`, it said "Children inherit dependency on parent completion via
+  hierarchy", but nothing gates a child on its parent: `bd ready` lists the
+  children of an open or in-progress parent. The refusal now says why the edge
+  cannot work (`P` cannot close until its children finish, so the gate would
+  never clear) and to put the work the child waits on in a sibling issue and
+  block on that. A non-blocking edge such as `related` is refused because the
+  hierarchy already links the pair. The `cannot add dependency: P.1 is already
+  a child of P.` prefix is unchanged.
 
 - **bd again reads `GT_ROOT` from a rig's `.beads/.env`** (#8117; also
   shipped in 1.3.4). `gc rig add` writes the city root there, and the
