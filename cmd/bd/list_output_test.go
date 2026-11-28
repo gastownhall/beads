@@ -204,6 +204,41 @@ func TestOutputFormattedListExactBytes(t *testing.T) {
 	}
 }
 
+// TestOutputFormattedListFormatNamesIgnoreCase pins GH#6279: the built-in
+// format names fold case like 'json' does, while a custom template is never
+// lowercased.
+func TestOutputFormattedListFormatNamesIgnoreCase(t *testing.T) {
+	t.Parallel()
+	issues, deps := listOutputFixture()
+
+	var dot bytes.Buffer
+	if err := outputDotFormat(&dot, issues, deps); err != nil {
+		t.Fatalf("outputDotFormat: %v", err)
+	}
+
+	for _, tc := range []struct {
+		format string
+		want   string
+	}{
+		{format: "DOT", want: dot.String()},
+		{format: "Dot", want: dot.String()},
+		{format: "DIGRAPH", want: "list-a list-b\n"},
+		{format: "DiGraph", want: "list-a list-b\n"},
+		{format: "{{.IssueID}} DependsOn {{.DependsOnID}} AS {{.Type}}", want: "list-a DependsOn list-b AS blocks\n"},
+	} {
+		t.Run(tc.format, func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			if err := outputFormattedList(&out, issues, deps, tc.format); err != nil {
+				t.Fatalf("outputFormattedList: %v", err)
+			}
+			if got := out.String(); got != tc.want {
+				t.Fatalf("formatted output bytes differ: got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestOutputFormattedListEdgeScope pins what --format's help now states: every
 // non-dot format renders the dependency edges BETWEEN the listed issues, so it
 // prints nothing both when there are no dependencies and when the only
