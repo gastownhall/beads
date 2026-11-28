@@ -2296,7 +2296,7 @@ func TestGateMetadataForCreateExplicitRepo(t *testing.T) {
 				t.Errorf("--repo on a %s gate accepted, want refusal (nothing would read it)", gateType)
 				continue
 			}
-			if !strings.Contains(err.Error(), "--repo applies only to gh:run and gh:pr gates") {
+			if !strings.Contains(err.Error(), "--repo applies only to GitHub or GitLab gates") {
 				t.Errorf("refusal for %s gate has the wrong text: %v", gateType, err)
 			}
 		}
