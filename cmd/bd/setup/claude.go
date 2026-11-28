@@ -1502,10 +1502,11 @@ func primeHookCommands(settingsPath string) []string {
 				if !ok {
 					continue
 				}
-				// Recognize both current (--hook-json) and legacy bare variants.
+				// Recognize both current (--hook-json) and legacy bare variants,
+				// and the --no-memories ones a hand-written hook runs (GH#7894).
 				switch command, _ := cmdMap["command"].(string); command {
-				case "bd prime", "bd prime --stealth",
-					"bd prime --hook-json", "bd prime --stealth --hook-json":
+				case "bd prime", "bd prime --stealth", "bd prime --no-memories",
+					"bd prime --hook-json", "bd prime --stealth --hook-json", "bd prime --no-memories --hook-json":
 					primeCommands = append(primeCommands, command)
 				}
 			}
