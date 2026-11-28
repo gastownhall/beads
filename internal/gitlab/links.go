@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -192,23 +193,26 @@ type ProjectScope struct {
 	project *Project // the configured project as GitLab reported it
 	err     error    // why GitLab did not report it
 	fetched bool
+	asked   bool // Contains needed the project
 }
 
-// ProjectScope returns the scope of the configured project. It asks GitLab
-// for the project at most once, and only for what the configuration does not
-// say: the project's path when it is configured by numeric ID, or its ID when
-// it is configured by path.
+// ProjectScope returns the scope of the configured project. It needs the
+// project only for what the configuration does not say: the project's path
+// when it is configured by numeric ID, or its ID when it is configured by
+// path. It starts from the project Init read, so a run reads it once; a
+// tracker that never ran Init asks GitLab at most once, when it needs to.
 func (t *Tracker) ProjectScope() *ProjectScope {
-	return &ProjectScope{tracker: t}
+	return &ProjectScope{tracker: t, project: t.initProject, err: t.initProjectErr, fetched: t.initProjectRead}
 }
 
 // Contains reports whether issue's external_ref names an issue of the
 // configured project: the "gitlab:{iid}" shorthand, which names that
 // project's issue; a ref whose bead holds an identity (LocalIdentityKey) in
 // that project, which a project rename leaves alone; or, for a bead without
-// one, a URL in that project's path. A ref the scope cannot place in it, as
-// when GitLab did not report the project, is outside it, and so is every ref
-// when no project is configured (group mode without
+// one, a URL in that project's path, under gitlab.url or under the address
+// GitLab writes into its links (learned in Init). A ref the scope cannot
+// place in it, as when GitLab did not report the project, is outside it, and
+// so is every ref when no project is configured (group mode without
 // gitlab.default_project_id).
 func (s *ProjectScope) Contains(ctx context.Context, issue *types.Issue) bool {
 	if issue == nil || issue.ExternalRef == nil || s.tracker.client == nil || s.tracker.client.ProjectID == "" {
@@ -226,13 +230,20 @@ func (s *ProjectScope) Contains(ctx context.Context, issue *types.Issue) bool {
 		id := s.projectID(ctx)
 		return id > 0 && m[1] == strconv.Itoa(id)
 	}
-	key := s.projectKey(ctx)
-	return key != "" && project == key
+	for _, key := range s.projectKeys(ctx) {
+		if project == key {
+			return true
+		}
+	}
+	return false
 }
 
 // Err returns the error that kept GitLab from reporting the configured
 // project when Contains asked for it, or nil.
 func (s *ProjectScope) Err() error {
+	if !s.asked {
+		return nil
+	}
 	return s.err
 }
 
@@ -247,25 +258,42 @@ func (s *ProjectScope) projectID(ctx context.Context) int {
 	return 0
 }
 
-// projectKey returns the configured project keyed as MatchKey keys a ref's
-// project, "gl://{host}/{path}", or "" when it is unknown.
-func (s *ProjectScope) projectKey(ctx context.Context) string {
-	if key := s.tracker.configuredMatchKeyProject(); key != "" {
-		return key
+// projectKeys returns the configured project keyed as MatchKey keys a ref's
+// project, "gl://{host}/{path}": under gitlab.url, where beads linked before
+// bd learned GitLab's web address keep their refs, and under that address
+// (webBase), where GitLab's links are. It returns none when the project is
+// unknown.
+func (s *ProjectScope) projectKeys(ctx context.Context) []string {
+	var keys []string
+	add := func(key string) {
+		if key != "" && !slices.Contains(keys, key) {
+			keys = append(keys, key)
+		}
+	}
+	t := s.tracker
+	if project := t.matchKeyProjectPath(); project != "" {
+		add(matchKeyProjectUnder(t.client.BaseURL, project))
+		if t.webBase != "" {
+			add(matchKeyProjectUnder(t.webBase, project))
+		}
+		return keys
 	}
 	p := s.fetch(ctx)
 	if p == nil {
-		return ""
+		return nil
 	}
-	host, path, ok := canonicalGitLabURL(p.WebURL)
-	if !ok || !validMatchKeyProject(strings.TrimPrefix(path, "/")) {
-		return ""
+	if host, path, ok := canonicalGitLabURL(p.WebURL); ok && validMatchKeyProject(strings.TrimPrefix(path, "/")) {
+		add("gl://" + host + path)
 	}
-	return "gl://" + host + path
+	if project := strings.Trim(strings.ToLower(strings.TrimSpace(p.PathWithNamespace)), "/"); t.webBase != "" && validMatchKeyProject(project) {
+		add(matchKeyProjectUnder(t.client.BaseURL, project))
+	}
+	return keys
 }
 
 // fetch returns the configured project as GitLab reports it, asking once.
 func (s *ProjectScope) fetch(ctx context.Context) *Project {
+	s.asked = true
 	if !s.fetched {
 		s.fetched = true
 		s.project, s.err = s.tracker.client.GetProject(ctx)

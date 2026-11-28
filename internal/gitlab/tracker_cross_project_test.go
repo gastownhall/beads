@@ -298,7 +298,7 @@ func TestPull_SameProjectRespellingUpdatesExistingBead(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 			// Configure the server by name so the self-hosted host has a case
-			// to differ in; onConfiguredHost recognizes it case-insensitively.
+			// to differ in; onBase recognizes it case-insensitively.
 			host := "localhost:" + srv.URL[strings.LastIndex(srv.URL, ":")+1:]
 			expand := strings.NewReplacer("%s", host, "%S", strings.ToUpper(host)).Replace
 			webURL = expand(tt.webURL)
