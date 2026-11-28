@@ -26,8 +26,8 @@ func (c *traceRecordingConn) QueryContext(context.Context, string, ...any) (*sql
 	return nil, errStubConn
 }
 
-func (c *traceRecordingConn) QueryRowContext(context.Context, string, ...any) *sql.Row {
-	return nil
+func (c *traceRecordingConn) QueryRowContext(ctx context.Context, _ string, _ ...any) *sql.Row {
+	return stubErrRow(ctx)
 }
 
 // TestRemoteCallsScrubStderrGitTrace is the regression test for the
