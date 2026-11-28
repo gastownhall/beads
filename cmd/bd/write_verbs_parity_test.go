@@ -2047,6 +2047,57 @@ func TestParityUpdateToClosedMatchesCloseRow(t *testing.T) {
 	}
 }
 
+// TestParityCloseVerbsReadAmbientSession pins where the two closing verbs
+// take a session from when --session is not typed (beads#5450). Claude Code
+// exports CLAUDE_CODE_SESSION_ID to the commands it runs and does not export
+// CLAUDE_SESSION_ID, so a bd that read only the second left closed_by_session
+// empty on every close made under Claude Code. bd's own variable still wins
+// where both are set, and a variable set to the empty string counts as unset.
+func TestParityCloseVerbsReadAmbientSession(t *testing.T) {
+	cases := []struct {
+		name    string
+		own     string // CLAUDE_SESSION_ID
+		harness string // CLAUDE_CODE_SESSION_ID
+		flag    string // --session
+		want    string
+	}{
+		{name: "neither variable", want: ""},
+		{name: "CLAUDE_CODE_SESSION_ID alone", harness: "harness-session", want: "harness-session"},
+		{name: "CLAUDE_SESSION_ID alone", own: "own-session", want: "own-session"},
+		{name: "CLAUDE_SESSION_ID wins over CLAUDE_CODE_SESSION_ID", own: "own-session", harness: "harness-session", want: "own-session"},
+		{name: "--session wins over both", own: "own-session", harness: "harness-session", flag: "typed-session", want: "typed-session"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CLAUDE_SESSION_ID", tc.own)
+			t.Setenv("CLAUDE_CODE_SESSION_ID", tc.harness)
+			env := newParityEnv(t)
+			env.seed("test-ambcls1", "Close verb", nil)
+			env.seed("test-ambcls2", "Update into closed", nil)
+
+			closeFlags, updateFlags := map[string]string{}, map[string]string{"status": "closed"}
+			if tc.flag != "" {
+				closeFlags["session"], updateFlags["session"] = tc.flag, tc.flag
+			}
+			env.setFlags(closeCmd, closeFlags)
+			if res := env.run(closeCmd, "test-ambcls1"); res.exitCode != 0 {
+				t.Fatalf("close: exit=%d err=%v stderr=%s", res.exitCode, res.err, res.stderr)
+			}
+			env.setFlags(updateCmd, updateFlags)
+			if res := env.run(updateCmd, "test-ambcls2"); res.exitCode != 0 {
+				t.Fatalf("update into closed: exit=%d err=%v stderr=%s", res.exitCode, res.err, res.stderr)
+			}
+
+			if got := env.get("test-ambcls1").ClosedBySession; got != tc.want {
+				t.Errorf("closed_by_session after `bd close` = %q, want %q", got, tc.want)
+			}
+			if got := env.get("test-ambcls2").ClosedBySession; got != tc.want {
+				t.Errorf("closed_by_session after `bd update -s closed` = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestParityUpdateToClosedClearsPriorCloseAttribution pins the misattribution
 // ga-kjkv1 fixes. The generic reopen branch never cleared closed_by_session, so
 // a re-close through the funnel inherited the PREVIOUS close's session and

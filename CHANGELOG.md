@@ -1562,6 +1562,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd close` and `bd update -s closed` record the session under Claude
+  Code.** Both verbs fill `closed_by_session` from `--session` or, without
+  it, from the `CLAUDE_SESSION_ID` environment variable. Claude Code exports
+  `CLAUDE_CODE_SESSION_ID` to the commands it runs and does not export
+  `CLAUDE_SESSION_ID`, so the column stayed empty on every close an agent
+  made unless a hook copied one variable to the other. bd now reads
+  `CLAUDE_CODE_SESSION_ID` when `CLAUDE_SESSION_ID` is unset or empty, so
+  every close made from a Claude Code session now records that session's ID:
+  it appears as `closed_by_session` in `--json` output and exports and as the
+  "Closed by session" line of `bd show --long`. `--session` and
+  `CLAUDE_SESSION_ID` keep their precedence, so a setup that sets either one
+  sees no change. On an http workspace, where `bd update -s
+  closed` cannot carry the session, the one-line notice on stderr now also
+  appears under Claude Code, and it names the variable the session came
+  from. (#5450)
+
 - **`bd show` no longer prints `Lease: expires expired` for a lapsed lease.**
   An in_progress issue keeps its lease row after the lease runs out, until
   `bd reclaim` sweeps it, and the lease line then printed the verb twice and

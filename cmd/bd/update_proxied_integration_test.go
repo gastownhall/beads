@@ -740,6 +740,29 @@ func TestProxiedServerUpdate2(t *testing.T) {
 		}
 	})
 
+	// Claude Code exports CLAUDE_CODE_SESSION_ID, not CLAUDE_SESSION_ID
+	// (beads#5450); the update reads it when bd's own variable is absent.
+	t.Run("close_with_session_claude_code_env", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ucwc")
+		issue := bdProxiedCreate(t, bd, p.dir, "Close-with-session harness env test")
+
+		if _, stderr, err := bdProxiedRunEnv(t, bd, p.dir, []string{"CLAUDE_CODE_SESSION_ID=sess-harness"}, "update", issue.ID, "-s", "closed"); err != nil {
+			t.Fatalf("update failed: %v\n%s", err, stderr)
+		}
+
+		db := openProxiedDB(t, p)
+		var got sql.NullString
+		if err := db.QueryRowContext(context.Background(),
+			"SELECT closed_by_session FROM issues WHERE id = ?", issue.ID).Scan(&got); err != nil {
+			t.Fatalf("read closed_by_session: %v", err)
+		}
+		if !got.Valid || got.String != "sess-harness" {
+			t.Errorf("closed_by_session: got %q (valid=%v), want %q (from CLAUDE_CODE_SESSION_ID)",
+				got.String, got.Valid, "sess-harness")
+		}
+	})
+
 	t.Run("ephemeral_persistent_conflict", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "uepc")

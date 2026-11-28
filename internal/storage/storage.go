@@ -1184,7 +1184,7 @@ type RemoteBackendStore interface {
 // Its role implementations refuse those members rather than drop them, since a
 // library caller may mean them. A front door that knows its own value is
 // derivable or advisory — `bd reopen`'s fixed "bd: reopen <id>" label, the
-// ambient CLAUDE_SESSION_ID on `bd update -s closed` — omits it for such a
+// ambient session ID on `bd update -s closed` — omits it for such a
 // store instead of failing the write; cmd/bd/remote_backend.go records
 // which members it omits and why.
 type CallerAttributionLimitedStore interface {
