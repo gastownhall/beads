@@ -27,7 +27,7 @@
     "created_at": "<TS>",
     "event_type": "dependency_added",
     "issue_id": "corpus-root",
-    "new_value": "Added dependency: corpus-root blocks corpus-dep",
+    "new_value": "Added dependency: corpus-dep blocks corpus-root",
     "old_value": ""
   },
   {
