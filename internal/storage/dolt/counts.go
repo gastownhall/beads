@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -56,7 +57,10 @@ func (s *DoltStore) CountIssuesByGroup(ctx context.Context, filter types.IssueFi
 // total matches GetDependentsWithMetadata (bd-cif6y4). An edge held in both
 // planes counts once, and a database with no `wisp_dependencies` counts the
 // durable plane alone. The body is issueops.CountDependencyEdgesInTx, the one
-// the proxied path runs.
+// the proxied path runs; its target lookups use the SARGABLE depTargetEqualsOr
+// predicate rather than depTargetExpr's COALESCE form, which defeated the
+// index and turned this into a full table scan that grew with total
+// dependency rows (GH#7666).
 func (s *DoltStore) CountDependents(ctx context.Context, issueID string) (int64, error) {
 	var n int64
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
@@ -126,17 +130,17 @@ func (s *DoltStore) CountDependentsByStatus(ctx context.Context, issueID string,
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
 		var perm, wisp int64
 		if err := tx.QueryRowContext(ctx,
-			`SELECT count(*) FROM dependencies d
-			 JOIN issues i ON i.id = d.issue_id
-			 WHERE COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external) = ? AND i.status = ?`,
-			issueID, string(status)).Scan(&perm); err != nil {
+			`SELECT count(*) FROM (`+sqlbuild.DepTargetUnion("dependencies d", "d.", func(string) string { return "d.issue_id" }, "= ?", "")+`) u
+			 JOIN issues i ON i.id = u.issue_id
+			 WHERE i.status = ?`,
+			append(sqlbuild.DepTargetUnionArgs([]any{issueID}, nil), string(status))...).Scan(&perm); err != nil {
 			return err
 		}
 		if err := tx.QueryRowContext(ctx,
-			`SELECT count(*) FROM wisp_dependencies d
-			 JOIN wisps w ON w.id = d.issue_id
-			 WHERE COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external) = ? AND w.status = ?`,
-			issueID, string(status)).Scan(&wisp); err != nil {
+			`SELECT count(*) FROM (`+sqlbuild.DepTargetUnion("wisp_dependencies d", "d.", func(string) string { return "d.issue_id" }, "= ?", "")+`) u
+			 JOIN wisps w ON w.id = u.issue_id
+			 WHERE w.status = ?`,
+			append(sqlbuild.DepTargetUnionArgs([]any{issueID}, nil), string(status))...).Scan(&wisp); err != nil {
 			return err
 		}
 		n = perm + wisp
