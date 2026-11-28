@@ -985,6 +985,40 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 		}
 	})
 
+	t.Run("dependencies on the expanded step point at its last step", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "work", Title: "Work", Expand: "inline-exp"},
+			{ID: "land", Title: "Land", Needs: []string{"work"}},
+			{ID: "notify", Title: "Notify", DependsOn: []string{"work"}},
+			{
+				ID:    "group",
+				Title: "Group",
+				Children: []*Step{
+					{ID: "child", Title: "Child", Needs: []string{"work"}},
+				},
+			},
+		}
+
+		result, err := ApplyInlineExpansions(steps, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+
+		stepMap := buildStepMap(result)
+		if got := stepMap["land"].Needs; len(got) != 1 || got[0] != "work.second" {
+			t.Errorf("land.Needs = %v, want [work.second]", got)
+		}
+		if got := stepMap["notify"].DependsOn; len(got) != 1 || got[0] != "work.second" {
+			t.Errorf("notify.DependsOn = %v, want [work.second]", got)
+		}
+		if got := stepMap["child"].Needs; len(got) != 1 || got[0] != "work.second" {
+			t.Errorf("child.Needs = %v, want [work.second]", got)
+		}
+		if got := steps[1].Needs; len(got) != 1 || got[0] != "work" {
+			t.Errorf("input land.Needs = %v, want [work] unchanged", got)
+		}
+	})
+
 	// compose.branch makes work need prepare. The inline expansion moves that
 	// need to work.first, where it is still compose.branch's edge and not the
 	// formula's: when prepare's condition drops it, work.first is routed to
