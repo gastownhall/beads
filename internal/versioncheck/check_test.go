@@ -1,6 +1,7 @@
 package versioncheck
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -389,26 +390,63 @@ func TestCheckRejectsMissingMalformedOrAmbiguousMetadata(t *testing.T) {
 }
 
 func TestCheckValidatesUVLockVersion(t *testing.T) {
-	root := writeFixture(t, "1.1.0")
-	lockPath := filepath.Join(root, "integrations", "beads-mcp", "uv.lock")
+	tests := []struct {
+		name      string
+		canonical string
+		python    string
+		wrong     string
+	}{
+		{name: "stable", canonical: "1.4.0", python: "1.4.0", wrong: "1.4.1"},
+		{name: "release candidate", canonical: "1.4.0-rc.1", python: "1.4.0rc1", wrong: "1.4.0rc2"},
+		{name: "alpha", canonical: "1.4.0-alpha.2", python: "1.4.0a2", wrong: "1.4.0b2"},
+		{name: "beta", canonical: "1.4.0-beta.3", python: "1.4.0b3", wrong: "1.4.0a3"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := writeFixture(t, test.canonical)
+			writeFixtureUVLock(t, root, test.python)
+			if _, err := Check(root); err != nil {
+				t.Fatalf("correct Python pin failed: %v", err)
+			}
+
+			writeFixtureUVLock(t, root, test.wrong)
+			_, err := Check(root)
+			if err == nil {
+				t.Fatal("incorrect Python pin unexpectedly passed")
+			}
+			want := fmt.Sprintf(
+				"MCP uv.lock (beads-mcp pin): %s (expected %s)",
+				test.wrong,
+				test.python,
+			)
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error = %q, want %q", err, want)
+			}
+		})
+	}
+}
+
+func TestCheckRejectsUnsupportedPythonPrereleaseNormalization(t *testing.T) {
+	root := writeFixture(t, "1.4.0-preview.1")
+	writeFixtureUVLock(t, root, "1.4.0-preview.1")
+	_, err := Check(root)
+	if err == nil {
+		t.Fatal("unsupported prerelease spelling unexpectedly passed")
+	}
+	if want := `canonical version "1.4.0-preview.1" is not a supported stable, alpha, beta, or rc release`; !strings.Contains(err.Error(), want) {
+		t.Fatalf("error = %q, want %q", err, want)
+	}
+}
+
+func writeFixtureUVLock(t *testing.T, root, version string) {
+	t.Helper()
+	path := filepath.Join(root, "integrations", "beads-mcp", "uv.lock")
 	if err := os.WriteFile(
-		lockPath,
-		[]byte("[[package]]\nname = \"beads-mcp\"\nversion = \"9.9.9\"\n"),
+		path,
+		[]byte("[[package]]\nname = \"beads-mcp\"\nversion = \""+version+"\"\n"),
 		0o644,
 	); err != nil {
 		t.Fatal(err)
-	}
-	_, err := Check(root)
-	if err == nil {
-		t.Fatal("stale MCP lock version unexpectedly passed")
-	}
-	if want := "MCP uv.lock (beads-mcp pin): 9.9.9 (expected 1.1.0)"; !strings.Contains(err.Error(), want) {
-		t.Fatalf("error = %q, want %q", err, want)
-	}
-
-	root = writeFixture(t, "1.1.0-rc.1")
-	if _, err := Check(root); err != nil {
-		t.Fatalf("PEP 440-normalized release-candidate lock version failed: %v", err)
 	}
 }
 
@@ -579,6 +617,10 @@ func writeFixture(t *testing.T, version string) string {
 func writeFixtureAt(t *testing.T, root, version string) {
 	t.Helper()
 
+	pythonVersion, err := normalizePythonVersion(version)
+	if err != nil {
+		pythonVersion = version
+	}
 	files := map[string]string{
 		"go.mod":                     "module " + ModulePath + "\n\ngo 1.26\n",
 		"cmd/bd/version.go":          "package main\n\nvar Version = \"" + version + "\"\n",
@@ -605,7 +647,7 @@ func writeFixtureAt(t *testing.T, root, version string) {
 			"    processorArchitecture=\"*\"/>\n</assembly>\n",
 		"integrations/beads-mcp/uv.lock": "version = 1\nrevision = 3\n\n" +
 			"[[package]]\nname = \"beads-mcp\"\nversion = \"" +
-			normalizePythonVersion(version) + "\"\n",
+			pythonVersion + "\"\n",
 		".githooks/pre-push": "# --- BEGIN BEADS INTEGRATION v" + version + " ---\n" +
 			"body\n# --- END BEADS INTEGRATION v" + version + " ---\n",
 	}
