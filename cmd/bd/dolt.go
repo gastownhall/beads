@@ -809,6 +809,8 @@ or 'bd dolt push --remote <remote>'. The remote must already exist (see
 					printDivergedHistoryGuidance("push --force")
 				} else if isRemoteDanglingReferenceErr(err) {
 					printRemoteDanglingReferenceGuidance(ctx, st, remote)
+				} else if isGitUsageRefusalErr(err) {
+					printGitUsageRefusalGuidance(os.Stderr, "bd dolt push", remote)
 				}
 				return SilentExit()
 			}
@@ -847,6 +849,8 @@ or 'bd dolt push --remote <remote>'. The remote must already exist (see
 				printDivergedHistoryGuidance(op)
 			} else if isRemoteDanglingReferenceErr(pushErr) {
 				printRemoteDanglingReferenceGuidance(ctx, st, "")
+			} else if isGitUsageRefusalErr(pushErr) {
+				printGitUsageRefusalGuidance(os.Stderr, "bd dolt push", "")
 			}
 			return SilentExit()
 		}
@@ -930,6 +934,8 @@ reports conflicts.`,
 					printAncestorPKMismatchGuidance(err)
 				} else if isDivergedHistoryErr(err) {
 					printDivergedHistoryGuidance("pull")
+				} else if isGitUsageRefusalErr(err) {
+					printGitUsageRefusalGuidance(os.Stderr, "bd dolt pull", remote)
 				}
 				return SilentExit()
 			}
@@ -960,6 +966,8 @@ reports conflicts.`,
 				printAncestorPKMismatchGuidance(err)
 			} else if isDivergedHistoryErr(err) {
 				printDivergedHistoryGuidance("pull")
+			} else if isGitUsageRefusalErr(err) {
+				printGitUsageRefusalGuidance(os.Stderr, "bd dolt pull", "")
 			}
 			return SilentExit()
 		}

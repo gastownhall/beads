@@ -154,6 +154,19 @@ func gitLsRemoteProbeError(ctx context.Context, err error) error {
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
+		// An old git rejects the "--" separator this probe passes with
+		// usage() and exit 129 (GH#6472) — an invocation refusal, not a
+		// remote problem. Trace output (GIT_TRACE=1) runs ahead of the
+		// banner, so firstNonEmptyLine would report the trace and drop the
+		// refusal itself. Keep the banner — it is what classifies the error
+		// as a Git usage refusal — with a one-line hint; the shared guidance
+		// block is printed by whichever caller turns this into a plan.
+		if exitErr.ExitCode() == 129 {
+			if banner := gitUsageBannerLine(string(exitErr.Stderr)); banner != "" {
+				return fmt.Errorf("git ls-remote: %v: %s — git rejected the arguments before authentication; an old or wrapped git on PATH can cause this (see docs/getting-started/sync-setup.md#usage-git-banner-on-push-pull-or-bootstrap)",
+					exitErr, scrubURLCredentials(banner))
+			}
+		}
 		// git can echo the remote it failed to reach — including a CI token in
 		// https://x-access-token:<token>@host form — so scrub credentials before
 		// this detail reaches plan.Reason, which flows to both stderr and
@@ -163,6 +176,18 @@ func gitLsRemoteProbeError(ctx context.Context, err error) error {
 		}
 	}
 	return fmt.Errorf("git ls-remote: %w", err)
+}
+
+// gitUsageBannerLine returns git's usage banner from a command's full stderr,
+// or "" when there is none. Trace output (GIT_TRACE=1) runs ahead of the
+// banner, so the first non-empty line is not the refusal itself.
+func gitUsageBannerLine(stderr string) string {
+	for _, line := range strings.Split(stderr, "\n") {
+		if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "usage: git ") {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 // firstNonEmptyLine returns the first meaningful line of git's stderr. git
