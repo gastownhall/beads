@@ -106,16 +106,20 @@ func RemoveDependencyCommitMessage(issueID, dependsOnID string) string {
 //
 // Edges are applied PARENT-CHILD FIRST regardless of request order, so the
 // complete planned hierarchy is visible before any blocking edge is validated
-// against it — an ordering the direct bulk path already relies on. The
-// whole-graph gate at the end runs even when the per-edge probe was skipped:
-// per-edge checks cannot see a path that only exists once several of this
-// request's own edges are in place.
+// against it — an ordering the direct bulk path already relies on.
+//
+// Exactly one cycle check covers each scheduling edge. With per-edge probes on
+// (the default), each edge's probe runs in tx after the request's earlier
+// edges were inserted in tx, so a cycle that only closes once several of the
+// request's own edges exist is refused at the last of them. With
+// SkipPerEdgeCycleCheck set, no probe runs and the whole-graph gate at the end
+// is the check.
 //
 // Both orderings hold ACROSS THE TWO PLANES, not within each: a request may
 // mix wisp-sourced and issue-sourced edges, and the hierarchy a blocking edge
-// is validated against, like the graph the final gate walks, spans both
-// tables. That is why the phase loop and the gate are over the whole request
-// and the plane is decided per edge, one level down.
+// is validated against, like the graph the probes and the final gate walk,
+// spans both tables. That is why the phase loop and the gate are over the
+// whole request and the plane is decided per edge, one level down.
 func ExecuteAddDependencies(ctx context.Context, tx *sql.Tx, request publicops.AddDependenciesRequest) (publicops.AddDependenciesResult, ChangedTables, error) {
 	// One scoped query for the whole request instead of a probe per edge: a
 	// bulk `bd dep add --file` against a remote Dolt pays WAN latency per
@@ -145,8 +149,19 @@ func ExecuteAddDependencies(ctx context.Context, tx *sql.Tx, request publicops.A
 			tables.Merge(edgeTables)
 		}
 	}
-	if err := checkAddedEdgesForCycles(ctx, tx, request.Edges); err != nil {
-		return publicops.AddDependenciesResult{}, nil, err
+	// The whole-graph gate runs only when the per-edge probes were skipped.
+	// Otherwise it would repeat their answer. Every probe ran in this write
+	// transaction, on the snapshot the gate would read plus the edges this
+	// request had inserted before it. A cycle the gate could find runs
+	// through at least one new edge; the probe of the last of those to be
+	// inserted saw every other edge of that cycle already in place and
+	// refused the request. The probes walk the same scheduling types
+	// (blocks, conditional-blocks, parent-child) in both dependency tables as
+	// the gate. Skipping it saves two reads, one per dependency table.
+	if request.SkipPerEdgeCycleCheck {
+		if err := checkAddedEdgesForCycles(ctx, tx, request.Edges); err != nil {
+			return publicops.AddDependenciesResult{}, nil, err
+		}
 	}
 	added := make([]publicops.DependencyEdge, len(request.Edges))
 	copy(added, request.Edges)
@@ -216,9 +231,12 @@ func addDependencyEdgeInTx(ctx context.Context, tx *sql.Tx, request publicops.Ad
 }
 
 // checkAddedEdgesForCycles runs the whole-graph gate over the scheduling edges
-// this request added. Per-edge probes cannot see a path that only closes once
-// several of the request's own edges exist, and SkipPerEdgeCycleCheck turns
-// them off entirely, so this is the check that actually holds the invariant.
+// in edges, which must already be inserted in tx. ExecuteAddDependencies runs
+// it only when SkipPerEdgeCycleCheck turned the per-edge probes off. With the
+// probes on it is not needed there: each probe runs in the same transaction
+// after the request's earlier edges are inserted, so a path that only closes
+// once several of the request's own edges exist is refused at the last of
+// them. The batch applier always runs it, as part of its end gate.
 //
 // The message is built through domain.NewCycleError so it errors.Is-matches
 // ErrDependencyCycle while rendering byte-for-byte what the direct bulk path

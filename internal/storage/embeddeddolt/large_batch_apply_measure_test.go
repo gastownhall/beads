@@ -65,8 +65,9 @@ func measureDSN(dir, database string) string {
 
 // openCountedConn opens a counting-wrapped *sql.DB against dataDir and USEs
 // database on it. The returned cleanup closes both the db and the
-// connector; the caller drives transactions on the returned db itself.
-func openCountedConn(ctx context.Context, dataDir, database string, counts *sqlcount.Counts) (*sql.DB, func(), error) {
+// connector; the caller drives transactions on the returned db itself. opts
+// are passed to sqlcount.WrapConnector.
+func openCountedConn(ctx context.Context, dataDir, database string, counts *sqlcount.Counts, opts ...sqlcount.Option) (*sql.DB, func(), error) {
 	cfg, err := doltembed.ParseDSN(measureDSN(dataDir, database))
 	if err != nil {
 		return nil, nil, err
@@ -80,7 +81,7 @@ func openCountedConn(ctx context.Context, dataDir, database string, counts *sqlc
 	if err != nil {
 		return nil, nil, err
 	}
-	wrapped := sqlcount.WrapConnector(connector, counts)
+	wrapped := sqlcount.WrapConnector(connector, counts, opts...)
 	db := sql.OpenDB(wrapped)
 	// A single connection: PrepareContext/BeginTx on this db must land on
 	// the same embedded session for USE below to still apply when the

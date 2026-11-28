@@ -9,7 +9,9 @@ import (
 // GetDependencyTreeInTx returns a flattened dependency tree for visualization.
 // It performs a recursive depth-first, pre-order traversal up to maxDepth, using
 // GetIssueInTx and GetDependenciesInTx/GetDependentsInTx which handle wisp
-// routing.
+// routing. A node on the last level maxDepth allows is returned without reading
+// its edges: every neighbor would sit beyond the bound, where the walk returns
+// nothing.
 //
 // Each issue is expanded at most once. A later edge into an issue already
 // expanded (a diamond's second parent) is kept as a leaf row with Deduped set,
@@ -40,6 +42,19 @@ func buildDependencyTreeInTx(ctx context.Context, tx DBTX, issueID string, depth
 		return nil, err
 	}
 	expanded[issueID] = issue
+
+	node := &types.TreeNode{
+		Issue:          *issue,
+		Depth:          depth,
+		ParentID:       parentID,
+		EdgeFromParent: edgeFromParent,
+	}
+	// TreeNode doesn't have Children field - return flat list
+	nodes := []*types.TreeNode{node}
+	if depth+1 >= maxDepth {
+		return nodes, nil
+	}
+
 	onPath[issueID] = true
 	defer delete(onPath, issueID)
 
@@ -54,15 +69,6 @@ func buildDependencyTreeInTx(ctx context.Context, tx DBTX, issueID string, depth
 		return nil, err
 	}
 
-	node := &types.TreeNode{
-		Issue:          *issue,
-		Depth:          depth,
-		ParentID:       parentID,
-		EdgeFromParent: edgeFromParent,
-	}
-
-	// TreeNode doesn't have Children field - return flat list
-	nodes := []*types.TreeNode{node}
 	for _, rel := range related {
 		if !isDependencyTreeEdge(rel.DependencyType) {
 			continue
