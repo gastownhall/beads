@@ -27,6 +27,9 @@ func epicChildRow(id string, status types.Status, closeReason string) *types.Iss
 // the "eligible for close" suffix is a closeability verdict and applies the
 // same non-completing-close rule as EpicStatus.EligibleForClose. Gating the
 // whole line, or gating nothing, each fails exactly one half.
+//
+// Every case here exercises an OPEN epic (the common case); the epic's own
+// status is pinned separately below (GH#6816).
 func TestPrintEpicChildProgressEligibility(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -69,7 +72,7 @@ func TestPrintEpicChildProgressEligibility(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out := captureStdout(t, func() error {
-				printEpicChildProgress(tt.children)
+				printEpicChildProgress(tt.children, types.StatusOpen)
 				return nil
 			})
 			if !strings.Contains(out, tt.wantProgress) {
@@ -77,6 +80,57 @@ func TestPrintEpicChildProgressEligibility(t *testing.T) {
 			}
 			if got := strings.Contains(out, "eligible for close"); got != tt.wantEligible {
 				t.Errorf("output %q: %q present = %v, want %v", out, "eligible for close", got, tt.wantEligible)
+			}
+		})
+	}
+}
+
+// TestPrintEpicChildProgressAlreadyClosed pins GH#6816: on an epic whose own
+// status is already closed, the footer must not tell the reader the epic is
+// "eligible for close" — that instructs an action already taken. The suffix
+// reports the EPIC's status, not its children's, so it applies at any
+// completion figure, and both ends are pinned here: the 100% case, which would
+// read "eligible for close" on an open epic (see the table above), and a
+// force-closed epic still carrying an open child, which printed no suffix at
+// all before this change.
+func TestPrintEpicChildProgressAlreadyClosed(t *testing.T) {
+	tests := []struct {
+		name         string
+		children     []*types.IssueWithDependencyMetadata
+		wantProgress string
+	}{
+		{
+			name: "every child closed completing",
+			children: []*types.IssueWithDependencyMetadata{
+				epicChildRow("c-1", types.StatusClosed, ""),
+				epicChildRow("c-2", types.StatusClosed, ""),
+			},
+			wantProgress: "2/2 complete (100%)",
+		},
+		{
+			name: "force-closed epic still carrying an open child",
+			children: []*types.IssueWithDependencyMetadata{
+				epicChildRow("c-1", types.StatusClosed, ""),
+				epicChildRow("c-2", types.StatusOpen, ""),
+			},
+			wantProgress: "1/2 complete (50%)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := captureStdout(t, func() error {
+				printEpicChildProgress(tt.children, types.StatusClosed)
+				return nil
+			})
+			if !strings.Contains(out, tt.wantProgress) {
+				t.Errorf("output %q does not contain raw progress %q", out, tt.wantProgress)
+			}
+			if strings.Contains(out, "eligible for close") {
+				t.Errorf("output %q: already-closed epic must not say %q", out, "eligible for close")
+			}
+			if !strings.Contains(out, "already closed") {
+				t.Errorf("output %q: expected the footer to say the epic is already closed", out)
 			}
 		})
 	}
