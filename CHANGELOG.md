@@ -1562,6 +1562,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd dep list` with many ids no longer costs a search and an issue read
+  per id** outside proxied-server mode. The multi-id listing resolved its
+  arguments one at a time before it read their edges: against a Dolt server,
+  5000 ids took about 20 seconds where a proxied-server workspace on the same
+  database took under one. It now settles every argument that names a stored
+  issue exactly as typed in the one read that brings its edges back, and
+  resolves only the rest one at a time (a partial id, an id routed to another
+  database, an id that names nothing). The output and the warnings are
+  unchanged. A workspace connected to a `bd serve` backend gains the same way:
+  the batch sends one `listDependencies` request where it also sent a
+  `getIssue` per id.
+
 - **`bd close` and `bd update -s closed` record the session under Claude
   Code.** Both verbs fill `closed_by_session` from `--session` or, without
   it, from the `CLAUDE_SESSION_ID` environment variable. Claude Code exports
