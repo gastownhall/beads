@@ -149,6 +149,7 @@ var YamlOnlyKeys = map[string]bool{
 	"dolt.pool-read-timeout":  true, // Pool per-I/O read deadline override (default 10s, bd-vz0y9)
 	"dolt.pool-write-timeout": true, // Pool per-I/O write deadline override (default 10s, bd-vz0y9)
 	"dolt.debug":              true, // Debug-mode dolt sql-server: --loglevel=debug + --prof cpu
+	"dolt.memory-limit":       true, // GOMEMLIMIT for the dolt sql-server bd starts (GH#7287)
 
 	// Secrets: tokens and API keys must NOT be stored in the Dolt database
 	// because that data is pushed to remotes, triggering secret-scanning
@@ -413,6 +414,9 @@ var userGlobalExactKeys = map[string]bool{
 	"mail.delegate":        true,
 	"dolt.remotesapi-port": true,
 	"node_id":              true,
+	// A memory limit is sized to one machine's RAM; committed, it would cap a
+	// 64 GB workstation at a laptop's budget or the reverse (GH#7287).
+	"dolt.memory-limit": true,
 }
 
 func IsUserGlobalKey(key string) bool {
@@ -1913,6 +1917,44 @@ func validateYamlConfigValue(key, value string) error {
 		if n < 0 {
 			return fmt.Errorf("memories.budget-chars must be a non-negative integer (0 = off), got %q", value)
 		}
+	case "dolt.memory-limit":
+		if !ValidGoMemLimit(value) {
+			return fmt.Errorf("dolt.memory-limit must be a positive byte count with an optional B, KiB, MiB, GiB or TiB suffix (e.g. 4GiB), or \"off\"; got %q", value)
+		}
 	}
 	return nil
+}
+
+// ValidGoMemLimit reports whether s is a GOMEMLIMIT value bd may hand to a
+// dolt sql-server: "off", or a positive byte count with an optional B, KiB,
+// MiB, GiB or TiB suffix, the grammar the Go runtime parses (it has no PiB or
+// EiB). The runtime aborts a process whose GOMEMLIMIT it cannot parse, so a
+// value that fails here must never reach the server's environment. Zero is
+// refused although the runtime accepts it: a zero soft limit makes the server
+// collect garbage continuously.
+func ValidGoMemLimit(s string) bool {
+	if s == "off" {
+		return true
+	}
+	digits, unit := s, int64(1)
+	for _, suffix := range []struct {
+		name string
+		unit int64
+	}{
+		{"KiB", 1 << 10}, {"MiB", 1 << 20}, {"GiB", 1 << 30}, {"TiB", 1 << 40},
+		{"B", 1},
+	} {
+		if trimmed, ok := strings.CutSuffix(s, suffix.name); ok {
+			digits, unit = trimmed, suffix.unit
+			break
+		}
+	}
+	if digits == "" || strings.TrimLeft(digits, "0123456789") != "" {
+		return false
+	}
+	n, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil || n <= 0 {
+		return false
+	}
+	return n <= (1<<63-1)/unit
 }

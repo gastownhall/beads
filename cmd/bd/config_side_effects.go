@@ -51,6 +51,15 @@ func checkConfigSetSideEffects(key, value string) []configSideEffect {
 			Command: "bd dolt stop && bd dolt start",
 		})
 
+	case key == "dolt.memory-limit":
+		// Not "bd dolt stop && bd dolt start": a proxied workspace refuses
+		// bd dolt start, and every mode restarts the server on the next bd
+		// command after a stop, which is when the new limit is read.
+		effects = append(effects, configSideEffect{
+			Message: "The memory limit applies to the next Dolt server bd starts on this machine; a running server keeps its current limit. Stop it and bd restarts it with the new limit on the next command.",
+			Command: "bd dolt stop",
+		})
+
 	case key == "routing.mode":
 		validModes := map[string]bool{"maintainer": true, "contributor": true, "auto": true, "explicit": true}
 		if !validModes[value] {
@@ -100,6 +109,12 @@ func checkConfigUnsetSideEffects(key string) []configSideEffect {
 		effects = append(effects, configSideEffect{
 			Message: "Debug config removed. Restart the server to drop --prof and --loglevel=debug.",
 			Command: "bd dolt stop && bd dolt start",
+		})
+
+	case "dolt.memory-limit":
+		effects = append(effects, configSideEffect{
+			Message: "Memory limit removed. A running Dolt server keeps its limit; stop it and bd restarts it without one on the next command.",
+			Command: "bd dolt stop",
 		})
 
 	case "backup.enabled":

@@ -51,6 +51,98 @@ func TestServerSpawnEnvIsGuarded(t *testing.T) {
 	}
 }
 
+// writeUserMemoryLimit writes dolt.memory-limit into an isolated user
+// config.yaml, where `bd config set dolt.memory-limit` puts it.
+func writeUserMemoryLimit(t *testing.T, value string) {
+	t.Helper()
+	isolateUserConfig(t)
+	path, err := config.UserConfigYamlPath()
+	if err != nil {
+		t.Fatalf("UserConfigYamlPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("dolt:\n  memory-limit: \""+value+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// gomemlimitEntries returns every GOMEMLIMIT entry in env; os/exec gives the
+// child the last one.
+func gomemlimitEntries(env []string) []string {
+	var got []string
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "GOMEMLIMIT=") {
+			got = append(got, kv)
+		}
+	}
+	return got
+}
+
+// GH#7287: the configured limit reaches the dolt sql-server bd spawns, an
+// operator's own GOMEMLIMIT is never overridden, and a value the Go runtime
+// would abort on never reaches the server.
+func TestServerSpawnEnvMemoryLimit(t *testing.T) {
+	t.Run("configured limit is passed to the server", func(t *testing.T) {
+		writeUserMemoryLimit(t, "2GiB")
+		t.Setenv("GOMEMLIMIT", "")
+		got := gomemlimitEntries(ServerSpawnEnv())
+		if n := len(got); n == 0 || got[n-1] != "GOMEMLIMIT=2GiB" {
+			t.Fatalf("GOMEMLIMIT entries = %q, want the last to be GOMEMLIMIT=2GiB", got)
+		}
+	})
+	t.Run("an inherited GOMEMLIMIT wins", func(t *testing.T) {
+		writeUserMemoryLimit(t, "2GiB")
+		t.Setenv("GOMEMLIMIT", "6GiB")
+		if got := gomemlimitEntries(ServerSpawnEnv()); len(got) != 1 || got[0] != "GOMEMLIMIT=6GiB" {
+			t.Fatalf("GOMEMLIMIT entries = %q, want only the inherited GOMEMLIMIT=6GiB", got)
+		}
+	})
+	t.Run("unset leaves the server unlimited", func(t *testing.T) {
+		isolateUserConfig(t)
+		t.Setenv("GOMEMLIMIT", "")
+		for _, kv := range gomemlimitEntries(ServerSpawnEnv()) {
+			if kv != "GOMEMLIMIT=" {
+				t.Fatalf("no dolt.memory-limit configured, but the server env carries %q", kv)
+			}
+		}
+	})
+	t.Run("an invalid value never reaches the server", func(t *testing.T) {
+		writeUserMemoryLimit(t, "4GB")
+		t.Setenv("GOMEMLIMIT", "")
+		for _, kv := range gomemlimitEntries(ServerSpawnEnv()) {
+			if kv != "GOMEMLIMIT=" {
+				t.Fatalf("invalid dolt.memory-limit 4GB reached the server env as %q; the Go runtime aborts on it", kv)
+			}
+		}
+	})
+}
+
+// On Windows an inherited GoMemLimit is the GOMEMLIMIT the server's runtime
+// reads, and os/exec would let an appended GOMEMLIMIT replace it, so the
+// operator's limit must be found in any spelling there. Elsewhere it is a
+// different variable and dolt.memory-limit still applies. Both modes run on
+// every host.
+func TestEnvHasValueFollowsPlatformCase(t *testing.T) {
+	env := []string{"PATH=/bin", "GoMemLimit=4GiB", "EMPTY="}
+	for _, tc := range []struct {
+		name            string
+		caseInsensitive bool
+		want            bool
+	}{
+		{"GOMEMLIMIT", true, true},   // Windows: GoMemLimit is GOMEMLIMIT
+		{"GOMEMLIMIT", false, false}, // POSIX: a different variable
+		{"GoMemLimit", false, true},
+		{"EMPTY", true, false}, // an empty value does not set a limit
+		{"MISSING", true, false},
+	} {
+		if got := envHasValue(env, tc.name, tc.caseInsensitive); got != tc.want {
+			t.Errorf("envHasValue(%q, caseInsensitive=%v) = %v, want %v", tc.name, tc.caseInsensitive, got, tc.want)
+		}
+	}
+}
+
 func TestAllocateEphemeralPort(t *testing.T) {
 	// Should return a valid port in the ephemeral range
 	port, err := allocateEphemeralPort("127.0.0.1")
