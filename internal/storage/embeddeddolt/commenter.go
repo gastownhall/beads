@@ -48,4 +48,22 @@ func (c *commenter) AddComment(ctx context.Context, request issueops.AddCommentR
 	return result, nil
 }
 
+func (c *commenter) DeleteComment(ctx context.Context, request issueops.DeleteCommentRequest) (issueops.DeleteCommentResult, error) {
+	if err := storageissueops.ValidateDeleteCommentRequest(request); err != nil {
+		return issueops.DeleteCommentResult{}, err
+	}
+	message := storageissueops.DeleteCommentCommitMessage(request.IssueID, request.CommentID)
+	var result issueops.DeleteCommentResult
+	err := c.store.runIssueOperationTx(ctx, message, func(tx *sql.Tx) (storageissueops.ChangedTables, error) {
+		var err error
+		var tables storageissueops.ChangedTables
+		result, tables, err = storageissueops.ExecuteDeleteComment(ctx, tx, request)
+		return tables, err
+	})
+	if err != nil {
+		return issueops.DeleteCommentResult{}, err
+	}
+	return result, nil
+}
+
 var _ issueops.Commenter = (*commenter)(nil)

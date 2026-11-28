@@ -18,6 +18,7 @@ type CommentSQLRepository interface {
 	IterByIssueID(ctx context.Context, issueID string, opts CommentOpts) (storage.Iter[types.Comment], error)
 	Insert(ctx context.Context, issueID, author, text string, opts CommentOpts) (*types.Comment, error)
 	InsertRecord(ctx context.Context, comment *types.Comment, opts CommentOpts) (*types.Comment, error)
+	Delete(ctx context.Context, issueID, commentID, actor string, opts CommentOpts) (*types.Comment, error)
 }
 
 type CommentUseCase interface {
@@ -35,6 +36,7 @@ type CommentUseCase interface {
 
 	AddCommentToIssue(ctx context.Context, issueID, author, text string) (*types.Comment, error)
 	AddCommentToWisp(ctx context.Context, wispID, author, text string) (*types.Comment, error)
+	DeleteComment(ctx context.Context, issueID, commentID, actor string, useWisp bool) (*types.Comment, error)
 }
 
 func NewCommentUseCase(commentRepo CommentSQLRepository) CommentUseCase {
@@ -137,6 +139,16 @@ func (u *commentUseCaseImpl) AddCommentToIssue(ctx context.Context, issueID, aut
 
 func (u *commentUseCaseImpl) AddCommentToWisp(ctx context.Context, wispID, author, text string) (*types.Comment, error) {
 	return u.add(ctx, wispID, author, text, true)
+}
+
+func (u *commentUseCaseImpl) DeleteComment(ctx context.Context, issueID, commentID, actor string, useWisp bool) (*types.Comment, error) {
+	if issueID == "" {
+		return nil, fmt.Errorf("comment delete: id must not be empty")
+	}
+	if commentID == "" {
+		return nil, fmt.Errorf("comment delete: comment id must not be empty")
+	}
+	return u.commentRepo.Delete(ctx, issueID, commentID, actor, CommentOpts{UseWispsTable: useWisp})
 }
 
 func (u *commentUseCaseImpl) add(ctx context.Context, id, author, text string, useWisp bool) (*types.Comment, error) {
