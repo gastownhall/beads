@@ -187,6 +187,15 @@ func (r Report) MismatchRemedy() string {
 
 // Check compares every released metadata surface with cmd/bd/version.go.
 func Check(root string) (Report, error) {
+	return check(root, nil)
+}
+
+// hookPathFilter limits hook-marker inspection for callers that already have
+// an authoritative input inventory. A nil filter preserves Check's discovery
+// of every non-dot regular file under .githooks.
+type hookPathFilter func(relativePath string) bool
+
+func check(root string, includeHook hookPathFilter) (Report, error) {
 	report := Report{CheckedSources: len(releaseSources)}
 	canonicalPath := filepath.Join(root, "cmd", "bd", "version.go")
 	canonical, err := readGoPackageVersion(canonicalPath)
@@ -255,7 +264,7 @@ func Check(root string) (Report, error) {
 	}
 	report.Sources = append(report.Sources, lockResult)
 
-	hookResults, hookProblems := checkTrackedHookMarkers(root, canonical)
+	hookResults, hookProblems := checkTrackedHookMarkers(root, canonical, includeHook)
 	report.CheckedHookMarkers = len(hookResults)
 	report.Sources = append(report.Sources, hookResults...)
 	problems = append(problems, hookProblems...)
@@ -269,7 +278,11 @@ func Check(root string) (Report, error) {
 	return report, nil
 }
 
-func checkTrackedHookMarkers(root, canonical string) ([]SourceResult, []string) {
+func checkTrackedHookMarkers(
+	root,
+	canonical string,
+	include hookPathFilter,
+) ([]SourceResult, []string) {
 	hooksDir := filepath.Join(root, ".githooks")
 	entries, err := os.ReadDir(hooksDir)
 	if err != nil {
@@ -298,6 +311,9 @@ func checkTrackedHookMarkers(root, canonical string) ([]SourceResult, []string) 
 			relative = path
 		}
 		relative = filepath.ToSlash(relative)
+		if include != nil && !include(relative) {
+			continue
+		}
 
 		content, readErr := os.ReadFile(path) //nolint:gosec // path comes from the bounded .githooks directory
 
