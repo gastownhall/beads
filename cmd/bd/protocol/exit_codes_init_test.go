@@ -172,15 +172,15 @@ func TestProtocol_ExitCode12_DestroyTokenMissing(t *testing.T) {
 
 // TestProtocol_ExitCode11_LocalExistsRefused pins §E3's exit 11: exit 11 is
 // returned only from the INTERACTIVE typed-confirmation abort in
-// `bd init --reinit-local` (cmd/bd/init.go, guarded by term.IsTerminal on
-// stdin). The non-interactive branch of the same guard returns 12 instead, so
-// no piped-stdin subprocess can produce 11 — the prompt only fires on a real
-// terminal. This test allocates a PTY (creack/pty, a test-only dependency),
-// drives `bd init --reinit-local` on it against a workspace with issues, answers
-// the "Type 'destroy N issues' to confirm:" prompt with the WRONG text, and
-// asserts the abort exits 11 — distinct from the 12 an agent supplying a bad
-// --destroy-token would get, so a script can tell "the operator declined at the
-// prompt" from "the token was wrong".
+// `bd init --reinit-local` (cmd/bd/init_reinit_preflight.go, guarded by
+// term.IsTerminal on stdin). The non-interactive branch of the same guard
+// returns 12 instead, so no piped-stdin subprocess can produce 11 — the prompt
+// only fires on a real terminal. This test allocates a PTY (creack/pty, a
+// test-only dependency), drives `bd init --reinit-local` on it against a
+// workspace with issues, answers the "Type 'destroy N issues' to confirm:"
+// prompt with the WRONG text, and asserts the abort exits 11 — distinct from
+// the 12 an agent supplying a bad --destroy-token would get, so a script can
+// tell "the operator declined at the prompt" from "the token was wrong".
 func TestProtocol_ExitCode11_LocalExistsRefused(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("no unix PTY on Windows; the exit-11 interactive prompt is unreachable here")
@@ -192,7 +192,7 @@ func TestProtocol_ExitCode11_LocalExistsRefused(t *testing.T) {
 
 	w := newWorkspace(t)
 	// The exit-11 prompt only fires when --reinit-local has data to destroy:
-	// countExistingIssues must return > 0, so seed one issue.
+	// countReinitTargetIssues must return > 0, so seed one issue.
 	w.create("--title", "seed issue for exit-11 refusal", "--type", "task")
 
 	cmd := exec.Command(w.bd, "init", "--reinit-local")
@@ -259,10 +259,11 @@ func TestProtocol_ExitCode11_LocalExistsRefused(t *testing.T) {
 		out := got()
 		if !strings.Contains(out, "Re-initializing will destroy") {
 			// runInitReinitPreflight skips the confirmation, without a warning,
-			// when countExistingIssues errors (it has its own 5s timeout) or
-			// counts zero. The reinit then goes on and blocks at init's next
-			// TTY prompt (e.g. "Change role? [y/N]:"), which lands here.
-			t.Fatalf("timed out waiting for the destroy-confirmation prompt: the reinit preflight never warned, so it skipped the confirmation (its issue count failed, e.g. the 5s store timeout lapsed, or found none)\n%s", out)
+			// only when countReinitTargetIssues counts zero (a count error
+			// still warns and prompts). The reinit then goes on and blocks at
+			// init's next TTY prompt (e.g. "Change role? [y/N]:"), which
+			// lands here.
+			t.Fatalf("timed out waiting for the destroy-confirmation prompt: the reinit preflight never warned, so it skipped the confirmation (its issue count found none)\n%s", out)
 		}
 		t.Fatalf("timed out waiting for the destroy-confirmation prompt\n%s", out)
 	}

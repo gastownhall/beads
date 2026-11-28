@@ -41,7 +41,7 @@ var metadataFactoryReferences = map[string]string{
 	"direct_mode.go:ensureStoreActiveWithContext":      "own workspace: the discovered workspace, after admission",
 	"doctor_export.go:openExportCheckStore":            "own workspace: the one bd selected for bd doctor --check=export, opened read-only",
 	"store_reopen.go:openReadOnlyStoreForDBPath":       "own workspace: reopens the command's own database path",
-	"init.go:countExistingIssues":                      "own workspace: the workspace bd init runs in",
+	"init_reinit_preflight.go:var openReinitTarget":    "own workspace: the .beads bd init is about to replace (the gate's target)",
 	"init_contributor.go:autoConfigureForkContributor": "a planning .beads bd init just created, empty",
 	"bootstrap.go:var openSyncedWarmupStore":           "own workspace: the workspace bd bootstrap just synced",
 	"repo.go:var repoSyncCmd":                          "bd-managed remote cache clone, never a user .beads",
