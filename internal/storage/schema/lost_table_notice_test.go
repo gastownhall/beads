@@ -22,7 +22,7 @@ func migrateLostTombstonesUpToFirstApply(t *testing.T, raw int) string {
 	lostTableNoticeOut = &notices
 	t.Cleanup(func() { lostTableNoticeOut = orig })
 	stubSentinelTables(t, allSentinelTablesExcept("wisp_id_tombstones"), nil)
-	stubSentinelColumns(t, map[string]bool{"leases.granted_node": true}, nil)
+	stubSentinelColumns(t, allSentinelColumns(), nil)
 
 	db, mock, err := sqlmock.New()
 	if err != nil {
