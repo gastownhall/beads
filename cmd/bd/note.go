@@ -185,18 +185,17 @@ To read notes on an issue, use: bd show <id>`,
 
 		SetLastTouchedID(result.ResolvedID)
 
-		updatedIssue, _ := issueStore.GetIssue(ctx, result.ResolvedID)
-		title := ""
-		if updatedIssue != nil {
-			title = updatedIssue.Title
-		}
 		if jsonOutput {
+			updatedIssue, _ := issueStore.GetIssue(ctx, result.ResolvedID)
 			if updatedIssue != nil {
 				return outputJSON(updatedIssue)
 			}
 			return nil
 		}
-		fmt.Printf("%s Note added to %s\n", ui.RenderPass("✓"), formatFeedbackID(result.ResolvedID, title))
+		// The title is as of the resolution read, a transaction before the
+		// write: a rename another process commits in between prints the old
+		// title. It only labels the confirmation, so no read after the write.
+		fmt.Printf("%s Note added to %s\n", ui.RenderPass("✓"), formatFeedbackID(result.ResolvedID, issue.Title))
 		return nil
 	},
 }
