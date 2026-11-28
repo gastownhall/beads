@@ -361,6 +361,16 @@ const (
 	CapIssuesUpdateGates = "issues.update.gates"
 )
 
+// CapIssuesUpdateLabelPrefixes is the behavior capability announcing that
+// updateIssue's patch accepts `remove_label_prefixes` and an issues.batchApply
+// update item's label patch accepts `remove_prefixes`
+// (issueops.LabelPatch.RemovePrefixes, GH#5657), spelled exactly as httpapi's
+// constant of the same name. lifecycle.go and batchapplier.go send a prefix
+// removal only to a server advertising it, and refuse it before the dial
+// otherwise; `bd set-state` reads it first (Store.ServesLabelPrefixPatch) and
+// against an older server sends the exact labels it read instead.
+const CapIssuesUpdateLabelPrefixes = "issues.update.labelPrefixes"
+
 // CapIssuesCreateDefaultPriority is the behavior capability announcing that
 // the server stores the create default priority for an ABSENT `priority`
 // member on issues.create, issues.batchCreate and issues.batchApply create
@@ -522,7 +532,7 @@ var behaviorCapabilities = []string{
 	CapCloseAutoCloseMolecule, CapListSearch,
 	CapListNoAssignee, CapListTitle, CapListIDs, CapIssuesUpdatePersistence, CapBlockingIsBlocked, CapIssuesUpdateClaim,
 	CapIssuesCreateGates, CapIssuesUpdateGates, CapListFilters,
-	CapArrivalSeq, CapDeleteContainmentCascade, CapIssuesUpdateForceClaimBlocked,
+	CapArrivalSeq, CapDeleteContainmentCascade, CapIssuesUpdateForceClaimBlocked, CapIssuesUpdateLabelPrefixes,
 }
 
 // CapabilityFor reports the capability token gating op, and whether op is on

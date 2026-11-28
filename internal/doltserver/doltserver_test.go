@@ -2674,7 +2674,7 @@ func TestStartupProofUsesReadyLineWithoutListenerOwnership(t *testing.T) {
 	if got, ok := findLogLevel(args); !ok || got != "info" {
 		t.Fatalf("buildDoltServerArgs log level = %q, want info (args %v)", got, args)
 	}
-	body, err := buildDoltServerYAMLConfig("127.0.0.1", 3308, 0, false, "/tmp/.doltcfg")
+	body, err := buildDoltServerYAMLConfig("127.0.0.1", 3308, 0, false, "/tmp/.doltcfg", "/tmp/dolt-server-files")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2744,9 +2744,13 @@ func TestVerifyRemotesAPIState(t *testing.T) {
 // behavior.dolt_transaction_commit left off (gastownhall/beads#4443:
 // docs/architecture/dolt.md tells users bd does not turn it on;
 // TestLifecycle_SharedServerSQLCommitSurvivesKill checks the running server,
-// but only where Dolt-backed integration tests run).
+// but only where Dolt-backed integration tests run), plus
+// system_variables.secure_file_priv set to the caller's directory: Dolt's
+// default "" lets SQL read and write any file the server process can reach
+// (TestLifecycle_ManagedServerConfinesSQLFileAccess checks the running
+// server, in the same tier).
 func TestBuildDoltServerYAMLConfig(t *testing.T) {
-	body, err := buildDoltServerYAMLConfig("127.0.0.1", 54321, 8081, false, "/tmp/some/.doltcfg")
+	body, err := buildDoltServerYAMLConfig("127.0.0.1", 54321, 8081, false, "/tmp/some/.doltcfg", "/tmp/some/dolt-server-files")
 	if err != nil {
 		t.Fatalf("buildDoltServerYAMLConfig: %v", err)
 	}
@@ -2774,6 +2778,9 @@ func TestBuildDoltServerYAMLConfig(t *testing.T) {
 	if cfg.DoltTransactionCommit() {
 		t.Error("DoltTransactionCommit = true, want false: every SQL transaction would become its own Dolt commit")
 	}
+	if got := cfg.SystemVars()["secure_file_priv"]; got != "/tmp/some/dolt-server-files" {
+		t.Errorf("system_variables.secure_file_priv = %#v, want %q\nconfig:\n%s", got, "/tmp/some/dolt-server-files", body)
+	}
 
 	gc := cfg.AutoGCBehavior()
 	if gc == nil {
@@ -2791,7 +2798,7 @@ func TestBuildDoltServerYAMLConfig(t *testing.T) {
 // YAML config's log level the same way buildDoltServerArgs does for the
 // CLI-flag form.
 func TestBuildDoltServerYAMLConfig_DebugLogLevel(t *testing.T) {
-	body, err := buildDoltServerYAMLConfig("127.0.0.1", 54321, 0, true, "/tmp/some/.doltcfg")
+	body, err := buildDoltServerYAMLConfig("127.0.0.1", 54321, 0, true, "/tmp/some/.doltcfg", "/tmp/some/dolt-server-files")
 	if err != nil {
 		t.Fatalf("buildDoltServerYAMLConfig: %v", err)
 	}

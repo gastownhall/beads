@@ -28,6 +28,7 @@ func (s *testSuite) TestIssueUseCase_ApplyUpdate() {
 	s.Run("AddRemoveLabelPaths", s.iucApplyUpdateAddRemoveLabels)
 	s.Run("SetLabelsDiffsAgainstCurrent", s.iucApplyUpdateSetLabels)
 	s.Run("SetLabelsThenAddsThenRemoves", s.iucApplyUpdateSetLabelsThenAddRemove)
+	s.Run("OnlySetReadingLabelEditsTouchTheCoordinationCell", s.iucApplyUpdateLabelCoordination)
 	s.Run("SameScalarAndMetadataAreNoops", s.iucApplyUpdateSameScalarAndMetadataAreNoops)
 	s.Run("ReparentReplacesParent", s.iucApplyUpdateReparent)
 	s.Run("ReparentEmptyUnparents", s.iucApplyUpdateUnparent)
@@ -177,6 +178,61 @@ func (s *testSuite) iucApplyUpdateSetLabels() {
 	labels, err := s.labelUseCase().GetLabels(s.Ctx(), "bd-iuc-au-sl")
 	s.Require().NoError(err)
 	s.Equal([]string{"y", "z"}, labels)
+}
+
+// iucApplyUpdateLabelCoordination pins, over real SQL, which uow label edits
+// rewrite the label coordination cell (GH#5657,
+// issueops.TouchLabelCoordinationInTx): a prefix removal or a replacement
+// that changes the set does, in the issue's own tier; the same edit repeated
+// as a no-op does not; named adds and removes never do. local_metadata is
+// dolt-ignored, so the per-test reset does not clear it: the case clears the
+// label cells itself, and the suite runs its cases one at a time.
+func (s *testSuite) iucApplyUpdateLabelCoordination() {
+	ctx := s.Ctx()
+	_, err := s.Runner().ExecContext(ctx, "DELETE FROM local_metadata WHERE `key` LIKE 'label-coordination/%'")
+	s.Require().NoError(err)
+	cell := func(tier string) string {
+		var value sql.NullString
+		s.Require().NoError(s.Runner().QueryRowContext(ctx,
+			"SELECT MAX(value) FROM local_metadata WHERE `key` LIKE ?", "label-coordination/v1/"+tier+"/%").Scan(&value))
+		return value.String
+	}
+	sentinel := func(tier, value string) {
+		_, err := s.Runner().ExecContext(ctx,
+			"UPDATE local_metadata SET value = ? WHERE `key` LIKE ?", value, "label-coordination/v1/"+tier+"/%")
+		s.Require().NoError(err)
+	}
+	const id = "bd-iuc-au-lc"
+	s.seedOpenIssue(id)
+	uc := s.issueUseCase()
+	apply := func(spec domain.UpdateSpec) {
+		_, err := uc.ApplyUpdate(ctx, id, spec, "tester")
+		s.Require().NoError(err)
+	}
+
+	apply(domain.UpdateSpec{AddLabels: []string{"state:a", "keep", "gone"}})
+	apply(domain.UpdateSpec{RemoveLabels: []string{"gone"}})
+	s.Empty(cell("labels"), "named adds and removes must not write the coordination cell")
+
+	setState := domain.UpdateSpec{RemoveLabelPrefixes: []string{"state:"}, AddLabels: []string{"state:b"}}
+	apply(setState)
+	s.NotEmpty(cell("labels"), "a prefix removal that changed the set must write the cell")
+	s.Empty(cell("wisp_labels"), "a durable issue's edit must write the durable tier only")
+
+	sentinel("labels", "sentinel")
+	apply(setState)
+	same := []string{"keep", "state:b"}
+	apply(domain.UpdateSpec{SetLabels: &same})
+	apply(domain.UpdateSpec{AddLabels: []string{"area:x"}, RemoveLabels: []string{"keep"}})
+	s.Equal("sentinel", cell("labels"), "no-op set-reading edits and named edits must leave the cell alone")
+
+	replace := []string{"state:c"}
+	apply(domain.UpdateSpec{SetLabels: &replace})
+	s.NotContains([]string{"", "sentinel"}, cell("labels"), "a replacement that changed the set must rewrite the cell")
+
+	labels, err := s.labelUseCase().GetLabels(ctx, id)
+	s.Require().NoError(err)
+	s.Equal([]string{"state:c"}, labels)
 }
 
 func (s *testSuite) iucApplyUpdateSetLabelsThenAddRemove() {

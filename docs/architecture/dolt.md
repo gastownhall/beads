@@ -521,6 +521,21 @@ the shared server's port: after `BEADS_DOLT_SERVER_PORT` and bd's port file,
 ahead of `dolt.port` in config.yaml. Servers you configure and run yourself
 (external or proxied) use whatever config you give them.
 
+**SQL file access.** The generated config sets Dolt's `secure_file_priv` to a
+`dolt-server-files` directory beside it: `.beads/dolt-server-files`, or
+`~/.beads/shared-server/dolt-server-files` for the shared server. That is the
+only directory the server's SQL may read files from (`LOAD_FILE`,
+`LOAD DATA INFILE`) or write them to (`SELECT ... INTO OUTFILE`). bd does not
+create it, and while it does not exist the server refuses those statements
+(`LOAD_FILE` returns `NULL`). The reason is who can reach the server: it runs
+as you with a passwordless `root` on a loopback port, and Dolt's default, an
+empty `secure_file_priv`, would let any local process that can open that port
+read and write your files through SQL. bd never uses those statements. To use
+them yourself, create the directory and keep the files in it; bd does not add
+it to `.beads/.gitignore`, so files there show as untracked. A server started
+with command-line flags (a Dolt too old for the config) keeps Dolt's default,
+because the config file is the only place the setting can be made.
+
 ## Maintenance — `bd prune` and `bd purge`
 
 `bd prune` permanently deletes closed non-ephemeral beads to reclaim storage
@@ -545,7 +560,17 @@ bd prune --older-than 90d --ignore-references --force
 ```
 
 `bd purge` is unaffected — ephemeral beads' references are themselves
-transient. For full Dolt storage reclaim after deleting many rows, follow
+transient.
+
+**Live-dependent protection:** `bd prune` and `bd purge` both skip a closed
+bead that a live bead still depends on through a `parent-child`, `tracks` or
+`blocks` edge: a closed epic whose child is still open, a closed bead a live
+convoy tracks, a closed blocker of a live bead. Live means any status that
+is not done. No flag turns this off (`--ignore-references` covers citations
+in text only); `bd delete` removes such a bead on purpose. When any are
+held back, `--json` reports the count as `live_dependent_skipped`.
+
+For full Dolt storage reclaim after deleting many rows, follow
 with `bd flatten`.
 
 **On Dolt 2.3.x, storage-reclaim operations can fail partway.** In older

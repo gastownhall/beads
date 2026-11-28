@@ -161,9 +161,11 @@ pointless).`,
 		// to open (matches the help text's "show in bd ready immediately").
 		var clearDeferStatus bool
 		// explicitSession: --session was typed (rather than inherited from
-		// CLAUDE_SESSION_ID), so omitting it on a store that cannot carry it
-		// is said out loud (remote_backend.go).
+		// the environment), so omitting it on a store that cannot carry it
+		// is said out loud (remote_backend.go). sessionEnvVar names the
+		// variable an inherited session came from, for that same notice.
 		var explicitSession bool
+		var sessionEnvVar string
 
 		if cmd.Flags().Changed("status") {
 			status, _ := cmd.Flags().GetString("status")
@@ -191,7 +193,7 @@ pointless).`,
 				session, _ := cmd.Flags().GetString("session")
 				explicitSession = session != ""
 				if session == "" {
-					session = os.Getenv("CLAUDE_SESSION_ID")
+					session, sessionEnvVar = ambientSession()
 				}
 				if session != "" {
 					updates["closed_by_session"] = session
@@ -576,7 +578,7 @@ pointless).`,
 					if explicitSession {
 						fmt.Fprintf(os.Stderr, "%s --session is not recorded: this backend's update cannot carry closed_by_session (bd close --session records it)\n", ui.RenderWarn("!"))
 					} else {
-						fmt.Fprintf(os.Stderr, "%s CLAUDE_SESSION_ID is not recorded as closed_by_session: this backend's update cannot carry it (bd close records it)\n", ui.RenderWarn("!"))
+						fmt.Fprintf(os.Stderr, "%s %s is not recorded as closed_by_session: this backend's update cannot carry it (bd close records it)\n", ui.RenderWarn("!"), sessionEnvVar)
 					}
 				}
 			}
@@ -1166,7 +1168,7 @@ func init() {
 	// combining --notes with --if-assignee could not previously opt into
 	// overwriting existing notes at all — cobra made --force unpassable
 	// alongside --if-assignee — which is the footgun this lifts.
-	updateCmd.Flags().String("session", "", "Claude Code session ID for status=closed (or set CLAUDE_SESSION_ID env var)")
+	updateCmd.Flags().String("session", "", "Claude Code session ID for status=closed (or set CLAUDE_SESSION_ID or CLAUDE_CODE_SESSION_ID env var)")
 	// Time-based scheduling flags (GH#820)
 	// Examples:
 	//   --due=+6h           Due in 6 hours

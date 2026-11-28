@@ -1776,6 +1776,17 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
+		// GH#7034: bd import with BEADS_DIR at the project root of an
+		// initialized workspace refuses as every other command run there
+		// does, with the note that names the directory meant. It asks before
+		// discovery, which in server mode routes such a root as a workspace
+		// with no store in it, past the import fallback below; see
+		// importRefusesBeadsDirAtProjectRoot.
+		if dbPath == "" && cmd.Name() == "import" && importRefusesBeadsDirAtProjectRoot() {
+			printNoDatabaseRefusal()
+			return SilentExit()
+		}
+
 		// Capture redirect info BEFORE FindDatabasePath() follows the redirect.
 		// When .beads/redirect points to a shared directory with a different
 		// dolt_database, the source's database name would be lost. Capture it
@@ -1883,6 +1894,10 @@ var rootCmd = &cobra.Command{
 					// which follows redirect files. Without this, a redirected .beads
 					// would create a local database instead of using the redirect target.
 					// (GH#bd-0qel)
+					//
+					// A BEADS_DIR that names the project root of an initialized
+					// workspace never gets here: bd import refused it ahead of
+					// discovery (importRefusesBeadsDirAtProjectRoot, GH#7034).
 					targetBeadsDir := beads.FindBeadsDir()
 					if targetBeadsDir == "" {
 						// An explicit BEADS_DIR is authoritative even

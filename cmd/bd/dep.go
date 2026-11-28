@@ -958,7 +958,11 @@ type depListAnchor struct {
 // split batch is N role calls merged back into one answer, and the caller's
 // argument count picks the shape (see batchMode at the call site). `bd dep list
 // a b c --json` documents an array of dependency records, not of issues.
-func readDepListEdges(ctx context.Context, anchors []depListAnchor, typeFilter string) ([]issueops.AnchorEdges, error) {
+//
+// known carries the anchors readExactLocalDepListEdges already answered. They
+// are not asked again: the answer in hand came from the same role on the same
+// store, and a second read of the same ids would only double the round trips.
+func readDepListEdges(ctx context.Context, anchors []depListAnchor, typeFilter string, known map[string]issueops.AnchorEdges) ([]issueops.AnchorEdges, error) {
 	var depTypes []types.DependencyType
 	if typeFilter != "" {
 		depTypes = []types.DependencyType{types.DependencyType(typeFilter)}
@@ -969,14 +973,18 @@ func readDepListEdges(ctx context.Context, anchors []depListAnchor, typeFilter s
 	// for the other's ids would answer that every one of them is missing.
 	byStore := map[storage.DoltStorage][]string{}
 	var order []storage.DoltStorage
+	answered := make(map[string]issueops.AnchorEdges, len(anchors))
 	for _, anchor := range anchors {
+		if edges, ok := known[anchor.fullID]; ok {
+			answered[anchor.fullID] = edges
+			continue
+		}
 		if _, seen := byStore[anchor.store]; !seen {
 			order = append(order, anchor.store)
 		}
 		byStore[anchor.store] = append(byStore[anchor.store], anchor.fullID)
 	}
 
-	answered := make(map[string]issueops.AnchorEdges, len(anchors))
 	for _, st := range order {
 		reader, err := st.EdgeReader()
 		if err != nil {
@@ -1001,6 +1009,99 @@ func readDepListEdges(ctx context.Context, anchors []depListAnchor, typeFilter s
 		out = append(out, answered[anchor.fullID])
 	}
 	return out, nil
+}
+
+// readExactLocalDepListEdges asks the local store about every argument in ONE
+// read and returns the answer for each argument that names a stored issue
+// exactly as typed.
+//
+// It exists because resolving a batch one argument at a time costs a search and
+// a full issue read per id: 5000 ids took 15 to 20 seconds against a Dolt
+// server where the proxied route, which resolves nothing, took under one. An
+// id that is present exactly as typed resolves to itself in the local store
+// (the first thing the per-argument resolver tries), so the role's own anchor
+// probe settles it, and the same read brings its edges back.
+//
+// Every argument it does not return still goes through the per-argument
+// resolver: a partial id, an id routed to another store, and an id that names
+// nothing all come back Missing here. Any failure returns nil for the same
+// reason — the per-argument path then decides and reports, as it did before.
+func readExactLocalDepListEdges(ctx context.Context, local storage.DoltStorage, args []string, typeFilter string) map[string]issueops.AnchorEdges {
+	if local == nil {
+		return nil
+	}
+	// The role rejects an empty id for the whole request, and the per-argument
+	// resolver is the one that refuses it with a message.
+	ids := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg != "" {
+			ids = append(ids, arg)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	reader, err := local.EdgeReader()
+	if err != nil || reader == nil {
+		return nil
+	}
+	request := issueops.EdgeReadRequest{IDs: ids}
+	if typeFilter != "" {
+		request.Types = []types.DependencyType{types.DependencyType(typeFilter)}
+	}
+	result, err := reader.ReadEdges(ctx, request)
+	if err != nil {
+		return nil
+	}
+	known := make(map[string]issueops.AnchorEdges, len(result.Anchors))
+	for _, anchor := range result.Anchors {
+		if !anchor.Missing {
+			known[anchor.ID] = anchor
+		}
+	}
+	return known
+}
+
+// resolveDepListAnchors turns the command's arguments into anchors, in argument
+// order. An argument in known is already settled as an exact local id and costs
+// no store call here; every other argument is resolved on its own, with partial
+// ids and routing.
+//
+// In batch mode an argument that does not resolve is reported on stderr and
+// skipped. Outside it the failure is the command's error.
+func resolveDepListAnchors(ctx context.Context, local storage.DoltStorage, args []string, batchMode bool, known map[string]issueops.AnchorEdges) ([]depListAnchor, error) {
+	var resolved []depListAnchor
+	for _, arg := range args {
+		if _, ok := known[arg]; ok {
+			resolved = append(resolved, depListAnchor{fullID: arg, store: local})
+			continue
+		}
+		routedResult, err := resolveAndGetIssueWithRouting(ctx, local, arg)
+		if err != nil {
+			if batchMode {
+				fmt.Fprintf(os.Stderr, "warning: resolving %s: %s (skipped)\n", arg, remedy.PrintedMessage(err))
+				continue
+			}
+			return resolved, HandleErrorRespectJSON("resolving %s: %v", arg, err)
+		}
+		if routedResult == nil || routedResult.Issue == nil {
+			if batchMode {
+				fmt.Fprintf(os.Stderr, "warning: no issue found: %s (skipped)\n", arg)
+				continue
+			}
+			return resolved, HandleErrorRespectJSON("no issue found: %s", arg)
+		}
+		depStore := local
+		if routedResult.Routed && routedResult.Store != nil {
+			depStore = routedResult.Store
+		}
+		resolved = append(resolved, depListAnchor{
+			fullID: routedResult.ResolvedID,
+			store:  depStore,
+			result: routedResult,
+		})
+	}
+	return resolved, nil
 }
 
 // printDepListEdges renders the role's per-anchor answer, and is shared by both
@@ -1127,33 +1228,26 @@ Examples:
 			direction = "down"
 		}
 
-		var resolved []depListAnchor
 		batchMode := len(args) > 1
-		for _, arg := range args {
-			routedResult, err := resolveAndGetIssueWithRouting(ctx, store, arg)
-			if err != nil {
-				if batchMode {
-					fmt.Fprintf(os.Stderr, "warning: resolving %s: %s (skipped)\n", arg, remedy.PrintedMessage(err))
-					continue
+
+		// The multi-id edge listing settles every exact local id in one read
+		// before anything is resolved one at a time (see
+		// readExactLocalDepListEdges). The neighbor query below does not use
+		// it: that one is a call per anchor whatever the resolution costs.
+		var known map[string]issueops.AnchorEdges
+		if batchMode && direction == "down" {
+			known = readExactLocalDepListEdges(ctx, store, args, typeFilter)
+		}
+		resolved, resolveErr := resolveDepListAnchors(ctx, store, args, batchMode, known)
+		defer func() {
+			for _, r := range resolved {
+				if r.result != nil {
+					r.result.Close()
 				}
-				return HandleErrorRespectJSON("resolving %s: %v", arg, err)
 			}
-			if routedResult == nil || routedResult.Issue == nil {
-				if batchMode {
-					fmt.Fprintf(os.Stderr, "warning: no issue found: %s (skipped)\n", arg)
-					continue
-				}
-				return HandleErrorRespectJSON("no issue found: %s", arg)
-			}
-			depStore := store
-			if routedResult.Routed && routedResult.Store != nil {
-				depStore = routedResult.Store
-			}
-			resolved = append(resolved, depListAnchor{
-				fullID: routedResult.ResolvedID,
-				store:  depStore,
-				result: routedResult,
-			})
+		}()
+		if resolveErr != nil {
+			return resolveErr
 		}
 		if batchMode && len(resolved) == 0 {
 			if jsonOutput {
@@ -1162,13 +1256,6 @@ Examples:
 			fmt.Fprintln(os.Stderr, "no resolvable issues in batch")
 			return nil
 		}
-		defer func() {
-			for _, r := range resolved {
-				if r.result != nil {
-					r.result.Close()
-				}
-			}
-		}()
 
 		// The multi-id edge listing is on the EdgeReader role, not Relations:
 		// Relations is anchored on ONE issue, answers with the issues on the far
@@ -1185,7 +1272,7 @@ Examples:
 		// ... across all requested issues", so a skipped anchor must not
 		// silently change what a script is parsing.
 		if batchMode && direction == "down" {
-			anchors, err := readDepListEdges(ctx, resolved, typeFilter)
+			anchors, err := readDepListEdges(ctx, resolved, typeFilter, known)
 			if err != nil {
 				return HandleErrorRespectJSON("%v", err)
 			}

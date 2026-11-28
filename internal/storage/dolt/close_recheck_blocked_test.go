@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -128,6 +129,92 @@ func TestCloseRecheckBlocked_ConcurrentSiblingCloses(t *testing.T) {
 	requireCleanTables(ctx, t, store, "issues")
 	if !doltHasCommitMessage(ctx, t, store, "bd: recheck blocked after close of rb-b") {
 		t.Fatal("the recheck corrected rb-c but minted no Dolt commit for it")
+	}
+}
+
+// TestCloseRecheckBlocked_IssueOperationCommitsBeforeRecheck is
+// gastownhall/beads#7035. An operation on the issue-operation runner mints its
+// own Dolt commit after its SQL transaction, and that commit's message carries
+// the operation's provenance. The recheck's commit stages the whole issues
+// table, so when a race made the recheck change a row and the recheck ran
+// first, the close's row went out under the recheck's message and the
+// operation's commit had nothing left to stage: dolt_log never showed the
+// operation. The operation's commit comes first, then the recheck's.
+func TestCloseRecheckBlocked_IssueOperationCommitsBeforeRecheck(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	seedSiblingBlockers(t, ctx, store)
+
+	// rb-a closes on its own connection and lands inside the operation's
+	// window: after the operation pinned its snapshot, before it commits.
+	// Neither close sees the other, so only the recheck unblocks rb-c.
+	_, commitA := beginRacingClose(t, ctx, store, "rb-a")
+	var landA sync.Once
+	attempts := 0
+	const operationMsg = "bd: close rb-b on the issue-operation runner"
+	const recheckMsg = "bd: recheck blocked after close of rb-b"
+	err := store.runIssueOperationTx(ctx, operationMsg, func(tx *sql.Tx) (issueops.ChangedTables, error) {
+		attempts++
+		var open int
+		if err := tx.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM issues WHERE id IN ('rb-a', 'rb-b') AND status <> 'closed'").Scan(&open); err != nil {
+			return nil, err
+		}
+		if attempts == 1 && open != 2 {
+			return nil, fmt.Errorf("the operation's snapshot sees %d open blockers, want 2", open)
+		}
+		landA.Do(commitA)
+		if _, err := issueops.CloseIssueInTx(ctx, tx, "rb-b", "done", "tester", ""); err != nil {
+			return nil, err
+		}
+		tables := issueops.ChangedTables{}
+		tables.Add("issues", "events")
+		return tables, nil
+	})
+	if err != nil {
+		t.Fatalf("close rb-b on the issue-operation runner: %v", err)
+	}
+	if attempts != 1 {
+		// A replayed body sees rb-a closed and unblocks rb-c itself, so the
+		// recheck would have nothing to publish and the race is not the one
+		// under test.
+		t.Fatalf("the operation body ran %d times, want 1: the closes did not race", attempts)
+	}
+
+	assertIsBlocked(t, ctx, store, "issues", "rb-c", false)
+	requireCleanTables(ctx, t, store, "issues")
+	rows, err := store.db.QueryContext(ctx, "SELECT message FROM dolt_log")
+	if err != nil {
+		t.Fatalf("read dolt_log: %v", err)
+	}
+	defer rows.Close()
+	// dolt_log lists the newest commit first.
+	operationAt, recheckAt := -1, -1
+	for i := 0; rows.Next(); i++ {
+		var message string
+		if err := rows.Scan(&message); err != nil {
+			t.Fatalf("scan dolt_log: %v", err)
+		}
+		switch message {
+		case operationMsg:
+			operationAt = i
+		case recheckMsg:
+			recheckAt = i
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate dolt_log: %v", err)
+	}
+	if operationAt < 0 {
+		t.Fatalf("dolt_log has no %q commit: the recheck published the operation's rows under its own message", operationMsg)
+	}
+	if recheckAt < 0 {
+		t.Fatalf("dolt_log has no %q commit: the recheck corrected rb-c but minted no Dolt commit for it", recheckMsg)
+	}
+	if recheckAt > operationAt {
+		t.Fatalf("the recheck's commit is older than the operation's (log positions %d and %d, newest first), want the operation's commit first", recheckAt, operationAt)
 	}
 }
 

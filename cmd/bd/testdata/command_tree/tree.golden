@@ -661,7 +661,7 @@ bd close
   flag --reason -r type=string default="" usage="Reason for closing"
   flag --reason-file type=string default="" usage="Read close reason from file (use - for stdin)"
   flag --resolution type=string default="" hidden usage="Alias for --reason (Jira CLI convention)"
-  flag --session type=string default="" usage="Claude Code session ID (or set CLAUDE_SESSION_ID env var)"
+  flag --session type=string default="" usage="Claude Code session ID (or set CLAUDE_SESSION_ID or CLAUDE_CODE_SESSION_ID env var)"
   flag --suggest-next type=bool default="false" usage="Show newly unblocked issues after closing"
 
 bd codex-hook
@@ -5941,6 +5941,13 @@ bd prune
     | --ignore-references to override (e.g., when bulk-decommissioning a
     | retired label across the rig).
     |
+    | Also skips closed beads a live bead still depends on through a parent-child,
+    | tracks or blocks edge: a closed epic whose child is still open, a closed bead
+    | a live convoy tracks, a closed blocker of a live bead. Live means any status
+    | that is not done. When any are held back, --json reports the count as
+    | live_dependent_skipped. --ignore-references does not turn this off; to remove
+    | such a bead on purpose use `bd delete`.
+    |
     | To delete closed ephemeral beads (wisps, transient molecules) use
     | `bd purge` instead.
     |
@@ -6776,7 +6783,7 @@ bd set-state
     |
     | This command:
     | 1. Creates an event bead recording the state change (source of truth)
-    | 2. Removes any existing label for the dimension
+    | 2. Removes every label of the dimension (each label starting with <dimension>:)
     | 3. Adds the new dimension:value label (fast lookup cache)
     |
     | State labels follow the convention <dimension>:<value>, for example:
@@ -6867,8 +6874,9 @@ bd show
   flag --as-of type=string default="" usage="Show issue as it existed at a specific commit hash or branch (requires Dolt; commit hashes must be the full 32-character hash from 'bd history', not a prefix)"
   flag --brief-deps type=bool default="false" usage="Reduce each dependency to its identity fields in JSON output (--json only; drops description, design, notes and acceptance criteria)"
   flag --children type=bool default="false" usage="Show only the children of this issue"
-  flag --comments-tail type=int default="0" usage="Render only the last N comments in text output, preceded by one elision line naming how many older ones were hidden (text output only; 0, the default, renders every comment unchanged; N must be >= 0)"
+  flag --comments-tail type=int default="0" usage="Render only the last N comments in text output, preceded by one elision line naming how many older ones were hidden (text output only, except that with --head it also sets how many comments --json carries; 0 renders every comment unchanged and is the default without --head; N must be >= 0)"
   flag --current type=bool default="false" usage="Show the currently active issue (in-progress, hooked, or last touched)"
+  flag --head type=bool default="false" usage="Show a short view of a long issue: the last 1 KB of the notes in place of the description, design, notes and acceptance criteria, and the last 3 comments (--comments-tail N changes the count), followed by one line naming what was withheld; the header, labels, metadata and dependency lists print as usual, and a comment is never cut. With --json the same subset is one object per issue: description, design and acceptance_criteria are absent, notes is the last 1 KB, comments holds the newest bodies, each dependency is reduced as by --brief-deps, and a withheld object counts what was left out (cannot be combined with --short, --long, --refs, --children, --thread, --as-of, --watch or --include-comments)"
   flag --id type=stringArray default="[]" usage="Issue ID (use for IDs that look like flags, e.g., --id=gt--xyz)"
   flag --include-comments type=bool default="false" usage="Stream full comment bodies in JSON output (--json only; may be slow on issues with many comments). Without it the comments field is absent entirely, not truncated: an issue with comments carries comment_count and comments_omitted=true, so check those before reading an absent comments field as none."
   flag --include-dependents type=bool default="false" usage="Stream full dependent issues in JSON output (--json only; may be slow on hub beads)"
@@ -7417,7 +7425,7 @@ bd update
   flag --persistent type=bool default="false" usage="Mark issue as persistent (promote wisp to regular issue)"
   flag --priority -p type=string default="" usage="Priority (0-4 or P0-P4, 0=highest)"
   flag --remove-label type=stringSlice default="[]" usage="Remove labels (repeatable)"
-  flag --session type=string default="" usage="Claude Code session ID for status=closed (or set CLAUDE_SESSION_ID env var)"
+  flag --session type=string default="" usage="Claude Code session ID for status=closed (or set CLAUDE_SESSION_ID or CLAUDE_CODE_SESSION_ID env var)"
   flag --set-labels type=stringSlice default="[]" usage="Set labels, replacing all existing (repeatable)"
   flag --set-metadata type=stringArray default="[]" usage="Set metadata key=value (repeatable, e.g., --set-metadata team=platform)"
   flag --spec-id type=string default="" usage="Link to specification document"

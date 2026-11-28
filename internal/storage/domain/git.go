@@ -64,7 +64,13 @@ type EnsureGitRepoResult struct {
 }
 
 type CommitInitArtifactsParams struct {
-	BeadsDir      string
+	BeadsDir string
+	// BeadsPaths, when non-nil, is staged in place of BeadsDir: named entries
+	// under it, each only when it exists, like OptionalPaths. bd init sets it
+	// for a workspace that keeps its own .beads/.gitignore (gitignore.manage:
+	// false), which bd cannot tell keeps the database out of a whole-directory
+	// add.
+	BeadsPaths    []string
 	OptionalPaths []string
 	Message       string
 	NoVerify      bool
@@ -192,17 +198,12 @@ func (u *gitUseCaseImpl) CommitInitArtifacts(ctx context.Context, params CommitI
 	}
 
 	paths := []string{params.BeadsDir}
-	for _, p := range params.OptionalPaths {
-		if p == "" {
-			continue
-		}
-		statPath := p
-		if !filepath.IsAbs(statPath) {
-			statPath = filepath.Join(u.workDir, statPath)
-		}
-		if _, err := os.Stat(statPath); err == nil {
-			paths = append(paths, p)
-		}
+	if params.BeadsPaths != nil {
+		paths = u.existingPaths(params.BeadsPaths)
+	}
+	paths = append(paths, u.existingPaths(params.OptionalPaths)...)
+	if len(paths) == 0 {
+		return CommitInitArtifactsResult{}, nil
 	}
 
 	if err := u.repo.Add(ctx, paths...); err != nil {
@@ -218,4 +219,23 @@ func (u *gitUseCaseImpl) CommitInitArtifacts(ctx context.Context, params CommitI
 		return CommitInitArtifactsResult{}, fmt.Errorf("CommitInitArtifacts: commit: %w", err)
 	}
 	return CommitInitArtifactsResult{StagedPaths: paths, DidCommit: commit.DidCommit}, nil
+}
+
+// existingPaths returns the non-empty paths that exist, a relative one read
+// against the use case's working directory.
+func (u *gitUseCaseImpl) existingPaths(paths []string) []string {
+	var existing []string
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		statPath := p
+		if !filepath.IsAbs(statPath) {
+			statPath = filepath.Join(u.workDir, statPath)
+		}
+		if _, err := os.Stat(statPath); err == nil {
+			existing = append(existing, p)
+		}
+	}
+	return existing
 }

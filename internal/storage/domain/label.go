@@ -21,6 +21,13 @@ type LabelSQLRepository interface {
 	// otherwise pick, since a rename by definition is not scoped to one id's
 	// plane. See domain.LabelUseCase.RenameLabel for the return contract.
 	RenameLabel(ctx context.Context, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error)
+	// TouchCoordination rewrites the clone-local cell that makes two
+	// overlapping edits of issueID's label set conflict at commit (GH#5657,
+	// issueops.TouchLabelCoordinationInTx), in opts' label tier, on this
+	// repository's transaction. Only an edit that chose its deletions from the
+	// set it read calls it, once, when it changes the set: SetLabels and
+	// ApplyUpdate's prefix removal. Insert and Delete never touch the cell.
+	TouchCoordination(ctx context.Context, issueID string, opts LabelOpts) error
 }
 
 type LabelUseCase interface {
@@ -198,19 +205,36 @@ func (u *labelUseCaseImpl) setMany(ctx context.Context, id string, labels []stri
 		}
 	}
 	existing := make(map[string]bool, len(current))
+	var drop []string
 	for _, l := range current {
 		existing[l] = true
 		if !desired[l] {
-			if err := u.labelRepo.Delete(ctx, id, l, actor, opts); err != nil {
-				return fmt.Errorf("set labels: remove %s: %w", l, err)
-			}
+			drop = append(drop, l)
 		}
 	}
+	var add []string
 	for l := range desired {
 		if !existing[l] {
-			if err := u.labelRepo.Insert(ctx, id, l, actor, opts); err != nil {
-				return fmt.Errorf("set labels: add %s: %w", l, err)
-			}
+			add = append(add, l)
+		}
+	}
+	if len(drop) == 0 && len(add) == 0 {
+		return nil
+	}
+	// The deletions come from the set read above, so an overlapping
+	// replacement of this issue's labels must conflict at commit and replay
+	// against the set this one commits (GH#5657).
+	if err := u.labelRepo.TouchCoordination(ctx, id, opts); err != nil {
+		return fmt.Errorf("set labels: %w", err)
+	}
+	for _, l := range drop {
+		if err := u.labelRepo.Delete(ctx, id, l, actor, opts); err != nil {
+			return fmt.Errorf("set labels: remove %s: %w", l, err)
+		}
+	}
+	for _, l := range add {
+		if err := u.labelRepo.Insert(ctx, id, l, actor, opts); err != nil {
+			return fmt.Errorf("set labels: add %s: %w", l, err)
 		}
 	}
 	return nil

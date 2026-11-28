@@ -78,7 +78,7 @@ func TestDepListEdgesReportsTheReadFailure(t *testing.T) {
 		edgeReaderAnchorFor("bd-2", reader),
 	}
 
-	if _, err := readDepListEdges(context.Background(), anchors, ""); !errors.Is(err, want) {
+	if _, err := readDepListEdges(context.Background(), anchors, "", nil); !errors.Is(err, want) {
 		t.Fatalf("readDepListEdges error = %v, want the read failure; a fall-through here changes the --json shape", err)
 	}
 }
@@ -104,7 +104,7 @@ func TestDepListEdgesAsksEachAnchorsOwnStore(t *testing.T) {
 		{fullID: "gt-1", store: rigStore},
 		{fullID: "hq-3", store: homeStore},
 	}
-	got, err := readDepListEdges(context.Background(), anchors, "")
+	got, err := readDepListEdges(context.Background(), anchors, "", nil)
 	if err != nil {
 		t.Fatalf("readDepListEdges: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestDepListEdgesCollapsesARepeatedAnchor(t *testing.T) {
 		{fullID: "bd-1", store: store},
 	}
 
-	got, err := readDepListEdges(context.Background(), anchors, "")
+	got, err := readDepListEdges(context.Background(), anchors, "", nil)
 	if err != nil {
 		t.Fatalf("readDepListEdges: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestDepListEdgesForwardsTheTypeFilter(t *testing.T) {
 		edgeReaderAnchorFor("bd-1", reader),
 		edgeReaderAnchorFor("bd-2", reader),
 	}
-	if _, err := readDepListEdges(context.Background(), anchors, "tracks"); err != nil {
+	if _, err := readDepListEdges(context.Background(), anchors, "tracks", nil); err != nil {
 		t.Fatalf("readDepListEdges: %v", err)
 	}
 	if len(reader.types) != 1 || reader.types[0] != types.DependencyType("tracks") {
@@ -176,6 +176,149 @@ type recordingTypeEdgeReader struct{ types []types.DependencyType }
 func (r *recordingTypeEdgeReader) ReadEdges(_ context.Context, req issueops.EdgeReadRequest) (issueops.EdgeReadResult, error) {
 	r.types = append([]types.DependencyType(nil), req.Types...)
 	return issueops.EdgeReadResult{Anchors: []issueops.AnchorEdges{}}, nil
+}
+
+// TestDepListExactLocalPassIsOneRead pins the batch cost: every argument goes
+// to the local store in one role call, and only the ones that exist exactly as
+// typed come back settled. A ghost is left out so the per-argument resolver
+// still gets to try it as a partial id or a routed id, and an empty argument is
+// held back because the role would reject the whole request over it.
+func TestDepListExactLocalPassIsOneRead(t *testing.T) {
+	reader := &fakeEdgeReader{
+		edges: map[string][]*types.Dependency{
+			"bd-1": {{IssueID: "bd-1", DependsOnID: "bd-2", Type: types.DepBlocks}},
+		},
+		missing: map[string]bool{"bd-9": true},
+	}
+	store := &edgeReaderStore{reader: reader}
+
+	known := readExactLocalDepListEdges(context.Background(), store, []string{"bd-1", "", "bd-9", "bd-2"}, "")
+
+	if len(reader.calls) != 1 || strings.Join(reader.calls[0], ",") != "bd-1,bd-9,bd-2" {
+		t.Fatalf("role calls = %v, want one for [bd-1 bd-9 bd-2]", reader.calls)
+	}
+	if len(known) != 2 {
+		t.Fatalf("known = %v, want bd-1 and bd-2 only", known)
+	}
+	if got := known["bd-1"]; len(got.Edges) != 1 || got.Edges[0].DependsOnID != "bd-2" {
+		t.Errorf("known[bd-1] = %+v, want the edge the role returned", got)
+	}
+	if _, ok := known["bd-2"]; !ok {
+		t.Errorf("known is missing bd-2, an anchor that exists with no edges")
+	}
+	if _, ok := known["bd-9"]; ok {
+		t.Errorf("known holds the ghost bd-9; it has to reach the per-argument resolver")
+	}
+}
+
+// TestDepListExactLocalPassForwardsTheTypeFilter pins that the first read is
+// narrowed like the second: its edges are the ones printed, so an unfiltered
+// read here would print every edge type under --type.
+func TestDepListExactLocalPassForwardsTheTypeFilter(t *testing.T) {
+	reader := &recordingTypeEdgeReader{}
+	store := &edgeReaderStore{reader: reader}
+	readExactLocalDepListEdges(context.Background(), store, []string{"bd-1", "bd-2"}, "tracks")
+	if len(reader.types) != 1 || reader.types[0] != types.DependencyType("tracks") {
+		t.Fatalf("role was handed types %v, want the one --type named", reader.types)
+	}
+}
+
+// TestDepListExactLocalPassYieldsOnFailure pins that the first read never
+// decides a failure. It answers nothing, and the per-argument path then
+// resolves and reports exactly as it did before the pass existed.
+func TestDepListExactLocalPassYieldsOnFailure(t *testing.T) {
+	ctx := context.Background()
+	args := []string{"bd-1", "bd-2"}
+	if known := readExactLocalDepListEdges(ctx, nil, args, ""); known != nil {
+		t.Errorf("nil store: known = %v, want nil", known)
+	}
+	if known := readExactLocalDepListEdges(ctx, &edgeReaderStore{err: errors.New("no edge reader")}, args, ""); known != nil {
+		t.Errorf("accessor failure: known = %v, want nil", known)
+	}
+	failing := &edgeReaderStore{reader: &fakeEdgeReader{err: errors.New("dependency table is unreachable")}}
+	if known := readExactLocalDepListEdges(ctx, failing, args, ""); known != nil {
+		t.Errorf("read failure: known = %v, want nil", known)
+	}
+	untouched := &fakeEdgeReader{}
+	if known := readExactLocalDepListEdges(ctx, &edgeReaderStore{reader: untouched}, []string{"", ""}, ""); known != nil || len(untouched.calls) != 0 {
+		t.Errorf("only empty arguments: known = %v, role calls = %v, want nil and none", known, untouched.calls)
+	}
+}
+
+// TestDepListResolvesKnownAnchorsWithoutAStoreCall is the regression for the
+// per-argument cost. The store's only real method is the EdgeReader accessor,
+// so a search or an issue read for a settled argument is a nil panic here.
+func TestDepListResolvesKnownAnchorsWithoutAStoreCall(t *testing.T) {
+	store := &edgeReaderStore{reader: &fakeEdgeReader{}}
+	known := map[string]issueops.AnchorEdges{
+		"bd-1": {ID: "bd-1"},
+		"bd-2": {ID: "bd-2"},
+		"bd-3": {ID: "bd-3"},
+	}
+
+	resolved, err := resolveDepListAnchors(context.Background(), store, []string{"bd-3", "bd-1", "bd-2"}, true, known)
+	if err != nil {
+		t.Fatalf("resolveDepListAnchors: %v", err)
+	}
+	want := []string{"bd-3", "bd-1", "bd-2"}
+	if len(resolved) != len(want) {
+		t.Fatalf("resolved = %d anchors, want %d", len(resolved), len(want))
+	}
+	for i, id := range want {
+		if resolved[i].fullID != id {
+			t.Errorf("resolved[%d] = %s, want %s (argument order)", i, resolved[i].fullID, id)
+		}
+		if resolved[i].store != storage.DoltStorage(store) {
+			t.Errorf("resolved[%d] answers from another store, want the local one", i)
+		}
+		if resolved[i].result != nil {
+			t.Errorf("resolved[%d] carries a routing handle; a settled local id opened nothing", i)
+		}
+	}
+}
+
+// TestDepListEdgesDoesNotRereadKnownAnchors pins the other half: an anchor the
+// first read answered is printed from that answer, in argument order, and only
+// the anchors it did not answer are asked for.
+func TestDepListEdgesDoesNotRereadKnownAnchors(t *testing.T) {
+	reader := &fakeEdgeReader{edges: map[string][]*types.Dependency{
+		"bd-3": {{IssueID: "bd-3", DependsOnID: "bd-4", Type: types.DepBlocks}},
+	}}
+	store := &edgeReaderStore{reader: reader}
+	known := map[string]issueops.AnchorEdges{
+		"bd-1": {ID: "bd-1", Edges: []*types.Dependency{{IssueID: "bd-1", DependsOnID: "bd-2", Type: types.DepBlocks}}},
+	}
+	anchors := []depListAnchor{
+		{fullID: "bd-3", store: store},
+		{fullID: "bd-1", store: store},
+		{fullID: "bd-3", store: store},
+	}
+
+	got, err := readDepListEdges(context.Background(), anchors, "", known)
+	if err != nil {
+		t.Fatalf("readDepListEdges: %v", err)
+	}
+	if len(reader.calls) != 1 || strings.Join(reader.calls[0], ",") != "bd-3,bd-3" {
+		t.Errorf("role calls = %v, want one for bd-3 alone", reader.calls)
+	}
+	if len(got) != 2 || got[0].ID != "bd-3" || got[1].ID != "bd-1" {
+		t.Fatalf("anchors = %+v, want bd-3 then bd-1, each once", got)
+	}
+	if len(got[1].Edges) != 1 || got[1].Edges[0].DependsOnID != "bd-2" {
+		t.Errorf("bd-1 edges = %+v, want the answer the first read gave", got[1].Edges)
+	}
+	if len(got[0].Edges) != 1 || got[0].Edges[0].DependsOnID != "bd-4" {
+		t.Errorf("bd-3 edges = %+v, want the second read's answer", got[0].Edges)
+	}
+
+	// With every anchor known there is nothing left to ask.
+	idle := &fakeEdgeReader{}
+	if _, err := readDepListEdges(context.Background(), []depListAnchor{{fullID: "bd-1", store: &edgeReaderStore{reader: idle}}}, "", known); err != nil {
+		t.Fatalf("readDepListEdges (all known): %v", err)
+	}
+	if len(idle.calls) != 0 {
+		t.Errorf("role calls = %v, want none when every anchor is known", idle.calls)
+	}
 }
 
 // TestDepListPrintsGhostAnchorsToStderr pins the Q11-approved user-visible

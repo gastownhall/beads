@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -96,5 +97,46 @@ func TestEmbeddedDepListSingleIDWarnsOnDroppedExternalEdge(t *testing.T) {
 	}
 	if !strings.Contains(batchStdout.String(), external.ID) || !strings.Contains(batchStdout.String(), local.ID) {
 		t.Errorf("batch mode should show both deps, got:\n%s", batchStdout.String())
+	}
+
+	// A mixed batch. Batch mode settles every exact local id in one read and
+	// resolves only the rest one at a time, so each kind of argument has to
+	// come out as it did when all of them were resolved one at a time: an
+	// exact local id with no edges, a bare hash that resolves to the source,
+	// an id routed to the sibling database, and an id that names nothing.
+	bareSource := strings.TrimPrefix(source.ID, "gt-")
+	ghost := "gt-nosuchissue"
+	mixedCmd := exec.Command(bd, "dep", "list", local.ID, bareSource, external.ID, ghost, "--json")
+	mixedCmd.Dir = dir
+	mixedCmd.Env = bdEnv(dir)
+	mixedStdout, mixedStderr, err := runCommandBuffers(t, mixedCmd)
+	if err != nil {
+		t.Fatalf("bd dep list (mixed batch): %v\nstdout:\n%s\nstderr:\n%s", err, mixedStdout.String(), mixedStderr.String())
+	}
+	var records []struct {
+		IssueID     string `json:"issue_id"`
+		DependsOnID string `json:"depends_on_id"`
+		Type        string `json:"type"`
+	}
+	if err := json.Unmarshal(mixedStdout.Bytes(), &records); err != nil {
+		t.Fatalf("mixed batch --json is not an array of dependency records: %v\n%s", err, mixedStdout.String())
+	}
+	got := map[string]string{}
+	for _, record := range records {
+		if record.IssueID != source.ID {
+			t.Errorf("mixed batch record has source %s, want only %s (the one argument with edges)", record.IssueID, source.ID)
+		}
+		got[record.DependsOnID] = record.Type
+	}
+	if len(records) != 2 || got[local.ID] != "blocks" || got[external.ID] != "related" {
+		t.Errorf("mixed batch records = %+v, want %s blocks %s and %s related %s", records, source.ID, local.ID, source.ID, external.ID)
+	}
+	if !strings.Contains(mixedStderr.String(), ghost) || !strings.Contains(mixedStderr.String(), "(skipped)") {
+		t.Errorf("mixed batch stderr should report %s as skipped, got:\n%s", ghost, mixedStderr.String())
+	}
+	for _, resolvable := range []string{local.ID, external.ID} {
+		if strings.Contains(mixedStderr.String(), "resolving "+resolvable) || strings.Contains(mixedStderr.String(), "no issue found: "+resolvable) {
+			t.Errorf("mixed batch stderr reports %s as unresolved, got:\n%s", resolvable, mixedStderr.String())
+		}
 	}
 }

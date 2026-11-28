@@ -491,6 +491,54 @@ func guardInitInHomeDir() (keepHomeClean bool, err error) {
 	return false, &exitError{Code: ExitHomeDirRefused}
 }
 
+// guardInitBeadsDirAtProjectRoot refuses `bd init` when BEADS_DIR names a
+// project root whose .beads directory already holds a workspace (GH#7034).
+//
+// An explicit BEADS_DIR is authoritative: init initializes the directory it
+// names. Naming the project root instead of its .beads is the usual slip, and
+// init then wrote metadata.json, config.yaml, README.md and a second database
+// into the project root, beside the real workspace, and exited 0. Before
+// BEADS_DIR became authoritative, discovery walked up, found the real
+// workspace, and init stopped with "already initialized".
+//
+// It reads the live BEADS_DIR, the same value RunE resolves init's target
+// from, so it judges exactly the directory init is about to write into. A
+// beads dir the root pre-run exported for itself came from discovery, which
+// returns a directory named .beads or a redirect's target, and the helper
+// never reports a directory named .beads or one holding beads metadata.
+//
+// Like guardInitInHomeDir this runs ahead of everything with an effect, the
+// proxied dispatch included, so both init routes refuse before they create
+// anything.
+func guardInitBeadsDirAtProjectRoot() error {
+	named := os.Getenv("BEADS_DIR")
+	workspace, ok := beads.ProjectRootNamedAsBeadsDir(named)
+	if !ok {
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "%s\n", beadsDirAtProjectRootRefusalMessage(named, workspace))
+	return &exitError{Code: 1}
+}
+
+// beadsDirAtProjectRootRefusalMessage is the What/Why/Next refusal text for a
+// `bd init` whose BEADS_DIR names a project root instead of its .beads.
+//
+// The remedy names the value to set instead of printing a command to paste:
+// the per-command form (BEADS_DIR=<dir> bd ...) exists only in POSIX shells.
+func beadsDirAtProjectRootRefusalMessage(named, workspace string) string {
+	return fmt.Sprintf(`bd init refuses: BEADS_DIR names %s, which holds no beads workspace, but %s does.
+
+  Why: BEADS_DIR names the .beads directory itself, not the project that
+       contains it. Initializing here would write a second workspace into
+       the project root, beside the one that is already there.
+
+  Next:
+    To use the existing workspace, set BEADS_DIR to
+      %s
+    or unset BEADS_DIR and run bd from inside the project.`,
+		remedy.PrintedValue(named), remedy.PrintedValue(workspace), remedy.PrintedValue(workspace))
+}
+
 // homeDirRefusalMessage is the What/Why/Next refusal text for a `bd init` run
 // directly in an untracked home directory.
 //
@@ -578,6 +626,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		keepHomeClean, homeErr := guardInitInHomeDir()
 		if homeErr != nil {
 			return homeErr
+		}
+		// Next, still before anything with an effect: a BEADS_DIR that names
+		// the project root of an initialized workspace is a slip, not a
+		// request for a second workspace there (GH#7034).
+		if rootErr := guardInitBeadsDirAtProjectRoot(); rootErr != nil {
+			return rootErr
 		}
 
 		prefix, _ := cmd.Flags().GetString("prefix")
@@ -4599,8 +4653,8 @@ func commitEmbeddedInitArtifacts(workDir string, quiet bool) {
 		}
 		return
 	}
-	gitAddCmd := initArtifactGitCommand(workDir, "add", ".beads/")
-	if _, addErr := gitAddCmd.CombinedOutput(); addErr == nil {
+	gitignoreManaged := config.GitignoreManaged(filepath.Join(workDir, ".beads"))
+	if stageInitBeadsArtifacts(workDir, gitignoreManaged) {
 		// Also stage the agents file if it exists
 		agentsFileToStage := config.SafeAgentsFile()
 		if _, statErr := os.Stat(filepath.Join(workDir, agentsFileToStage)); statErr == nil {
@@ -4627,8 +4681,9 @@ func commitEmbeddedInitArtifacts(workDir string, quiet bool) {
 				_ = codexCmd.Run()
 			}
 		}
-		// Also stage .gitignore if modified by EnsureProjectGitignore
-		if _, statErr := os.Stat(filepath.Join(workDir, ".gitignore")); statErr == nil {
+		// Also stage .gitignore if modified by EnsureProjectGitignore, which
+		// leaves it alone under gitignore.manage: false.
+		if _, statErr := os.Stat(filepath.Join(workDir, ".gitignore")); statErr == nil && gitignoreManaged {
 			giCmd := initArtifactGitCommand(workDir, "add", ".gitignore")
 			_ = giCmd.Run()
 		}
@@ -4650,6 +4705,43 @@ func commitEmbeddedInitArtifacts(workDir string, quiet bool) {
 		// Removing them WILL cause unrecoverable data corruption and data loss.
 		// Dolt manages these files itself; external interference is never safe.
 	}
+}
+
+// initTrackedBeadsFiles are the entries bd init writes under .beads for git to
+// track. The .beads/.gitignore bd writes keeps everything else there (the
+// database, locks, machine-local state) out of a whole-directory add.
+var initTrackedBeadsFiles = []string{"config.yaml", "metadata.json", "README.md", "hooks"}
+
+// initTrackedBeadsPaths returns initTrackedBeadsFiles as paths relative to the
+// repository root. bd init's commit stages these by name, instead of the whole
+// .beads directory, for a workspace that sets gitignore.manage: false: bd did
+// not write that .beads/.gitignore and cannot tell that it keeps the database
+// and the machine-local files out of git.
+func initTrackedBeadsPaths() []string {
+	paths := make([]string, 0, len(initTrackedBeadsFiles))
+	for _, name := range initTrackedBeadsFiles {
+		paths = append(paths, filepath.Join(".beads", name))
+	}
+	return paths
+}
+
+// stageInitBeadsArtifacts stages workDir/.beads for bd init's commit and
+// reports whether the commit should go ahead. Under a .beads/.gitignore bd
+// manages it adds the whole directory, and a failed add stops the commit, as it
+// always has. Otherwise it adds bd's own files by name (initTrackedBeadsPaths),
+// one at a time like the optional files: one that the repository's own ignore
+// rules exclude stays out of the commit instead of stopping it.
+func stageInitBeadsArtifacts(workDir string, gitignoreManaged bool) bool {
+	if gitignoreManaged {
+		_, err := initArtifactGitCommand(workDir, "add", ".beads/").CombinedOutput()
+		return err == nil
+	}
+	for _, path := range initTrackedBeadsPaths() {
+		if _, err := os.Stat(filepath.Join(workDir, path)); err == nil {
+			_ = initArtifactGitCommand(workDir, "add", "--", path).Run()
+		}
+	}
+	return true
 }
 
 func initArtifactGitCommand(workDir string, args ...string) *exec.Cmd {
