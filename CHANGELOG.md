@@ -189,6 +189,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd version --json` reports the newest schema migration the binary
+  carries.** Two new integer fields, `latest_schema_migration` and
+  `latest_ignored_schema_migration`, give the highest migration number the
+  binary embeds in each series: the values a database's `schema_migrations`
+  and `ignored_schema_migrations` cursors reach once this binary has migrated
+  it. `bd version` opens no database, so an upgrade script can ask a candidate
+  binary for its numbers and compare them with a database's cursors before any
+  command of that binary runs against the database; until now the numbers
+  could only be read from the source tree. They are not the existing
+  `schema_version` field, which is the version of the JSON output contract and
+  is unchanged. The text form of `bd version` is unchanged. Binaries released
+  before this change do not print the two fields, so a script should treat a
+  missing field as unknown, not as 0.
+
 - **`hooks.manage` and `gitignore.manage`: per-repository opt-outs from bd's
   hook and .gitignore management.** A repository that runs its own hook manager
   or keeps its own `.beads/.gitignore` had no durable way to stop bd writing
