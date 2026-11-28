@@ -206,13 +206,13 @@ func ValidateMetadataSchema(metadata json.RawMessage, schema MetadataSchemaConfi
 }
 
 // validMetadataKeyRe validates metadata key names for use in JSON path expressions.
-// Allows alphanumeric, underscore, dot (dotted keys like "jira.sprint"), and
-// slash (path-style keys like "jira/sprint").
-var validMetadataKeyRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_./]*$`)
+// Allows alphanumeric, underscore, hyphen, dot (dotted keys like
+// "jira.sprint"), and slash (path-style keys like "jira/sprint").
+var validMetadataKeyRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_./-]*$`)
 
 // ValidateMetadataKey checks that a metadata key is safe for use in JSON path
 // expressions. Keys must start with a letter or underscore and contain only
-// alphanumeric characters, underscores, dots, and slashes.
+// alphanumeric characters, underscores, hyphens, dots, and slashes.
 func ValidateMetadataKey(key string) error {
 	if !validMetadataKeyRe.MatchString(key) {
 		return fmt.Errorf("invalid metadata key %q: must match %s", key, validMetadataKeyRe.String())
