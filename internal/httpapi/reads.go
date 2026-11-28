@@ -183,9 +183,10 @@ const readySortDefault = "priority"
 // than a second hand-rolled list beside the document's.
 func countFilters(q *query) issueops.CountRequest {
 	return issueops.CountRequest{
-		// ONE status, not the listing's comma-separated OR set. The role says so
-		// and the document says so; reading it with q.csv here would publish a
-		// set the role would answer 0 for.
+		// The status value passes through as written: the count role splits a
+		// comma-separated OR set and keeps match-nothing-rather-than-fail per
+		// part (issueops.CountRequest.Status), the same spelling the issues
+		// list takes. The document documents the set.
 		Status:    q.str("status"),
 		IssueType: q.str("type"),
 		Assignee:  q.str("assignee"),

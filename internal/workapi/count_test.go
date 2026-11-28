@@ -432,6 +432,79 @@ func TestBuildCountFilterTakesStatusAndTypeAsWritten(t *testing.T) {
 	}
 }
 
+// TestBuildCountFilterSplitsTheStatusSet pins the --status spelling `bd list`
+// documents (GH#8502): a comma-separated value is a status OR set on the count
+// plane too, instead of one status name no row carries — which made
+// `bd count --status open,in_progress` answer 0 next to a listing that
+// returned the same filter's rows.
+//
+// A single name keeps the exact single-status shape (Status pointer, nil
+// Statuses), and the match-nothing-rather-than-fail rule survives the split:
+// parts are taken as written, so an unknown part — and a stray "all" inside a
+// set, which `bd list` would refuse — contributes nothing instead of widening
+// the count or erroring a scripted caller.
+func TestBuildCountFilterSplitsTheStatusSet(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		status     string
+		wantStatus *types.Status
+		wantSet    []types.Status
+	}{
+		{"empty stays no predicate", "", nil, nil},
+		{"single name keeps the pointer shape", "open", statusPtr(types.StatusOpen), nil},
+		{"single name is trimmed like list reads it", " open ", statusPtr(types.StatusOpen), nil},
+		{"all stays the no-filter spelling", "all", nil, nil},
+		{"comma set becomes the OR set", "open,in_progress", nil, []types.Status{types.StatusOpen, types.StatusInProgress}},
+		{"set parts are trimmed", " open , in_progress ", nil, []types.Status{types.StatusOpen, types.StatusInProgress}},
+		{"unknown part is kept as written", "open,no-such-status", nil, []types.Status{types.StatusOpen, "no-such-status"}},
+		{"all inside a set contributes nothing", "open,all", nil, []types.Status{types.StatusOpen, "all"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := BuildCountFilter(issueops.CountRequest{Status: tt.status}, ListConfig{})
+			if err != nil {
+				t.Fatalf("BuildCountFilter(status=%q): %v", tt.status, err)
+			}
+			if !reflect.DeepEqual(got.Status, tt.wantStatus) {
+				t.Errorf("Status = %v, want %v", countPtrStr(got.Status), countPtrStr(tt.wantStatus))
+			}
+			if !reflect.DeepEqual(got.Statuses, tt.wantSet) {
+				t.Errorf("Statuses = %v, want %v", got.Statuses, tt.wantSet)
+			}
+		})
+	}
+}
+
+// TestCountAndListStatusSetAgreement pins that count and list turn the same
+// comma-separated --status selector into the same OR set — the count/list
+// parity this role exists for (GH#4387), for the case GH#8502 broke.
+//
+// The agreement holds for names both planes accept. It deliberately does not
+// hold for an unknown part: list refuses the selector with ErrValidation while
+// count matches nothing rather than failing, a divergence the CountRequest
+// contract states. A test asserting equality there would pin a property the
+// code does not have.
+func TestCountAndListStatusSetAgreement(t *testing.T) {
+	cfg := ListConfig{}
+	listFilter, err := BuildListFilter(issueops.ListRequest{Status: "open,in_progress"}, cfg)
+	if err != nil {
+		t.Fatalf("BuildListFilter: %v", err)
+	}
+	countFilter, err := BuildCountFilter(issueops.CountRequest{Status: "open,in_progress"}, cfg)
+	if err != nil {
+		t.Fatalf("BuildCountFilter: %v", err)
+	}
+	if !reflect.DeepEqual(listFilter.Statuses, countFilter.Statuses) {
+		t.Errorf("Statuses: list = %v, count = %v — the two front doors split --status differently",
+			listFilter.Statuses, countFilter.Statuses)
+	}
+	if listFilter.Status != nil || countFilter.Status != nil {
+		t.Errorf("a comma set must leave the single-status predicate unset: list Status = %v, count Status = %v",
+			countPtrStr(listFilter.Status), countPtrStr(countFilter.Status))
+	}
+}
+
+func statusPtr(s types.Status) *types.Status { return &s }
+
 // TestValidateCountGroupClosesTheDimensionSet pins the five published
 // dimensions and the typed refusal for everything else. The refusal has to be
 // ErrValidation rather than a bare string because both front doors classify it,

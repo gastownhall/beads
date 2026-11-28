@@ -168,6 +168,11 @@ func RunCounterCountsClosedRows(t *testing.T, ctx context.Context, fixture Count
 	// "all" is the other spelling of every status, and it must not narrow.
 	scope.Status = "all"
 	assertCounterTotal(t, ctx, fixture, scope, 3)
+
+	// A comma-separated value is the OR set the listing documents (GH#8502):
+	// open and in_progress here, two of the three seeded rows.
+	scope.Status = "open,in_progress"
+	assertCounterTotal(t, ctx, fixture, scope, 2)
 }
 
 // RunCounterAnUnknownStatusMatchesNothing pins counter.go:50-56 and :237-241:

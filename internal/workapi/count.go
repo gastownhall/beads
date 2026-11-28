@@ -80,9 +80,23 @@ func BuildCountFilter(in issueops.CountRequest, cfg ListConfig) (types.IssueFilt
 	// Status and IssueType are taken as written. Neither is validated against
 	// the workspace vocabulary: issueops.CountRequest promises an unrecognized
 	// name matches nothing rather than failing.
+	//
+	// A comma-separated value is a status OR set, the spelling bd list
+	// documents (GH#8502); parts are trimmed of surrounding spaces and
+	// otherwise stay as written, so an unknown part — and a
+	// stray "all" inside a set — contributes nothing rather than widening the
+	// count. The value passes through the list selector's splitter, so a
+	// single name comes back trimmed the way bd list reads it.
 	if in.Status != "" && in.Status != "all" {
-		status := types.Status(in.Status)
-		filter.Status = &status
+		parts := splitStatusSelector(in.Status)
+		if len(parts) > 1 {
+			for _, part := range parts {
+				filter.Statuses = append(filter.Statuses, types.Status(part))
+			}
+		} else {
+			status := types.Status(parts[0])
+			filter.Status = &status
+		}
 	}
 	if in.IssueType != "" {
 		issueType := types.IssueType(in.IssueType)
