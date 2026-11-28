@@ -590,6 +590,29 @@ func TestHealthzStaysUpWhileTheDatabaseIsDown(t *testing.T) {
 	}
 }
 
+// TestProxyEndpointUnavailableIsRetryableNotReady: a read whose workspace
+// proxy lookup failed (gastownhall/beads#7295) answers 503 db_unavailable
+// with Retry-After, so a readiness probe retries rather than seeing a server
+// error, and liveness stays green.
+func TestProxyEndpointUnavailableIsRetryableNotReady(t *testing.T) {
+	gone := &fakeProvider{err: proxyLookupFailed(errors.New("timeout waiting for proxy to become ready on its OS-assigned port"))}
+	ts := newTestServer(t, Config{Provider: gone})
+
+	resp := ts.get(t, "/v0/beads/ready?limit=1")
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("ready status = %d, want 503", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Retry-After"); got != strconv.Itoa(retryAfterContention) {
+		t.Errorf("Retry-After = %q, want %d", got, retryAfterContention)
+	}
+	if got := decodeBody(t, resp)["code"]; got != string(CodeDBUnavailable) {
+		t.Errorf("code = %v, want %s", got, CodeDBUnavailable)
+	}
+	if resp := ts.get(t, "/healthz"); resp.StatusCode != http.StatusOK {
+		t.Errorf("/healthz status = %d, want 200", resp.StatusCode)
+	}
+}
+
 func TestNoQueryParametersAccepted(t *testing.T) {
 	ts := newTestServer(t, Config{})
 

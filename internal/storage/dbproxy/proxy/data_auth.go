@@ -36,8 +36,10 @@ const DataNetwork = "bdproxy"
 // address it dials was verified when it was registered, but the proxy there
 // can exit (idle timeout, crash, bd dolt stop, an upgrade replacing it), and
 // another local user can then bind the freed port. A long-lived client (bd
-// serve never re-resolves its endpoint) would otherwise run its whole MySQL
-// session, every write and every result it trusts, against that listener.
+// serve looks the proxy up again before each new connection, but the port can
+// change hands between that lookup and the dial) would otherwise run its whole
+// MySQL session, every write and every result it trusts, against that
+// listener.
 //
 // Version note: a proxy started by an older bd does not accept this
 // handshake, and a client older than it does not send it, so a

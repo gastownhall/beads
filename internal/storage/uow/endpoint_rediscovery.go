@@ -14,6 +14,22 @@ import (
 // errProviderClosed refuses a new connection of a provider that has been closed.
 var errProviderClosed = errors.New("uow: provider closed")
 
+// ErrEndpointUnavailable marks a new connection that was never dialed because
+// looking up the workspace proxy failed: the proxy could be neither adopted
+// nor started within the proxy's own start rules. The connection reached no
+// database at all, so the failure is unreachability, not a statement error,
+// and it is retryable: the next new connection looks the proxy up again. The
+// lookup's cause stays matchable beside it, and the text reads
+// "uow: rediscover proxy endpoint: <cause>". A caller's own cancellation or
+// deadline, and a closed provider, are never wrapped in it.
+var ErrEndpointUnavailable = errors.New("uow: rediscover proxy endpoint")
+
+// IsEndpointUnavailable reports whether err is a new connection that failed
+// because looking up the workspace proxy failed (ErrEndpointUnavailable).
+func IsEndpointUnavailable(err error) bool {
+	return errors.Is(err, ErrEndpointUnavailable)
+}
+
 // proxyEndpointResolver re-resolves the workspace proxy's endpoint for every
 // new physical connection of a provider pool (#7295). A proxy with a finite
 // idle timeout exits once its last client disconnects, and the replacement the
@@ -121,7 +137,8 @@ func (r *proxyEndpointResolver) beforeConnect(ctx context.Context, cfg *mysql.Co
 		// Never fall back to the construction address, which may now belong to
 		// an unrelated listener, and never ErrBadConn: the pool would retry on
 		// the same failing discovery instead of reporting it.
-		return fmt.Errorf("uow: rediscover proxy endpoint: %w", d.err)
+		// ErrEndpointUnavailable tells callers no database was reached.
+		return fmt.Errorf("%w: %w", ErrEndpointUnavailable, d.err)
 	}
 	cfg.Addr = d.ep.Address()
 	return nil

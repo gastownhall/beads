@@ -2355,6 +2355,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   until the process restarted. A connection whose lookup fails reports
   `uow: rediscover proxy endpoint: <cause>` (#7295; builds on #7998 by
   @vishnujayvel).
+- `bd serve` on a proxied-server workspace now answers a request whose proxy
+  lookup fails, such as a cold start that overruns the proxy's 15s start
+  deadline, with 503 `db_unavailable` and `Retry-After` instead of 500
+  `internal`, so readiness probes and clients retry it as they retry any
+  other unreachable database. The failed connection's error keeps its text
+  and is marked `uow.ErrEndpointUnavailable` (#8135).
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from
