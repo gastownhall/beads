@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "client.go",
         "fieldmapper.go",
+        "parent_reconcile.go",
         "refs.go",
         "tracker.go",
         "types.go",
@@ -24,6 +25,7 @@ go_test(
     name = "jira_test",
     srcs = [
         "client_test.go",
+        "parent_reconcile_test.go",
         "refs_test.go",
         "retry_test.go",
         "tracker_test.go",

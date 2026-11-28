@@ -374,16 +374,26 @@ func runJiraPush(cmd *cobra.Command, args []string) error {
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 	engine.PushHooks = buildJiraPushHooksForStore(ctx, trackerStore)
 
-	result, err := engine.Sync(ctx, tracker.SyncOptions{
+	opts := tracker.SyncOptions{
 		Push:     true,
 		Pull:     false,
 		DryRun:   dryRun,
 		IssueIDs: args,
-	})
+	}
+	result, err := engine.Sync(ctx, opts)
 	if err != nil {
 		return HandleError("sync failed: %v", err)
 	}
+	if result.Success {
+		reconcileJiraParentsForStore(ctx, trackerStore, jt, engine.PushHooks, opts, nil, dryRun, jsonOutput, result)
+	}
 	outputSyncResult(result, dryRun)
+	if !jsonOutput && len(result.Warnings) > 0 {
+		fmt.Println("\nWarnings:")
+		for _, w := range result.Warnings {
+			fmt.Printf("  - %s\n", w)
+		}
+	}
 	return nil
 }
 

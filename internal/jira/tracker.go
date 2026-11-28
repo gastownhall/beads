@@ -253,8 +253,19 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 	// Set project to primary (first) project key.
 	fields["project"] = map[string]string{"key": t.PrimaryProjectKey()}
 
+	parentKey, err := t.resolveParentForCreate(ctx, issue, mapper)
+	if err != nil {
+		return nil, err
+	}
+	if parentKey != "" {
+		fields["parent"] = map[string]string{"key": parentKey}
+	}
+
 	created, err := t.client.CreateIssue(ctx, fields)
 	if err != nil {
+		if parentKey != "" {
+			return nil, fmt.Errorf("creating Jira issue for %s with parent %s: %w", issue.ID, parentKey, err)
+		}
 		return nil, err
 	}
 
@@ -426,6 +437,12 @@ func jiraToTrackerIssue(ji *Issue, priorityMap map[string]string) tracker.Tracke
 		ti.Assignee = ji.Fields.Assignee.DisplayName
 		ti.AssigneeEmail = ji.Fields.Assignee.EmailAddress
 		ti.AssigneeID = ji.Fields.Assignee.AccountID
+	}
+
+	// Parent
+	if ji.Fields.Parent != nil {
+		ti.ParentID = ji.Fields.Parent.Key
+		ti.ParentInternalID = ji.Fields.Parent.ID
 	}
 
 	// Timestamps
