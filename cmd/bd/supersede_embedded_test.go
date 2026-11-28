@@ -123,6 +123,98 @@ func TestEmbeddedSupersede(t *testing.T) {
 		}
 	})
 
+	// ===== --ack blocks open dependents until acknowledged =====
+
+	t.Run("ack_blocks_open_dependents", func(t *testing.T) {
+		oldDecision := bdCreate(t, bd, dir, "Ack decision v1", "--type", "decision")
+		newDecision := bdCreate(t, bd, dir, "Ack decision v2", "--type", "decision")
+		inProgress := bdCreate(t, bd, dir, "Ack step in progress", "--type", "task")
+		next := bdCreate(t, bd, dir, "Ack next step", "--type", "task")
+		finished := bdCreate(t, bd, dir, "Ack finished step", "--type", "task")
+		unrelated := bdCreate(t, bd, dir, "Ack unrelated step", "--type", "task")
+		bdDepAdd(t, bd, dir, inProgress.ID, oldDecision.ID, "--type", "related")
+		bdDepAdd(t, bd, dir, next.ID, oldDecision.ID, "--type", "related")
+		bdDepAdd(t, bd, dir, finished.ID, oldDecision.ID, "--type", "related")
+		bdClose(t, bd, dir, finished.ID)
+		bdUpdate(t, bd, dir, inProgress.ID, "--claim")
+
+		out, err := bdRunWithFlockRetry(t, bd, dir, "supersede", oldDecision.ID, "--with", newDecision.ID, "--ack", "--json")
+		if err != nil {
+			t.Fatalf("supersede --ack --json failed: %v\n%s", err, out)
+		}
+		var result struct {
+			Superseded      string   `json:"superseded"`
+			Replacement     string   `json:"replacement"`
+			Acknowledgement string   `json:"acknowledgement"`
+			Blocked         []string `json:"blocked"`
+		}
+		if err := json.Unmarshal(out, &result); err != nil {
+			t.Fatalf("parse supersede --ack --json: %v\n%s", err, out)
+		}
+		if result.Superseded != oldDecision.ID || result.Replacement != newDecision.ID {
+			t.Fatalf("unexpected supersede result: %+v", result)
+		}
+		if result.Acknowledgement == "" {
+			t.Fatalf("expected an acknowledgement issue, got %+v", result)
+		}
+		blocked := map[string]bool{}
+		for _, id := range result.Blocked {
+			blocked[id] = true
+		}
+		if len(blocked) != 2 || !blocked[inProgress.ID] || !blocked[next.ID] {
+			t.Fatalf("expected exactly %s and %s blocked, got %v", inProgress.ID, next.ID, result.Blocked)
+		}
+
+		ready := readyIDs(t, bd, dir)
+		if ready[next.ID] {
+			t.Errorf("%s should leave bd ready until the acknowledgement closes", next.ID)
+		}
+		if !ready[unrelated.ID] {
+			t.Errorf("%s has no edge to the superseded issue and should stay ready", unrelated.ID)
+		}
+		if !ready[result.Acknowledgement] {
+			t.Errorf("acknowledgement %s should be ready", result.Acknowledgement)
+		}
+
+		closeOut := bdCloseFail(t, bd, dir, inProgress.ID)
+		if !strings.Contains(closeOut, result.Acknowledgement) {
+			t.Errorf("close refusal should name the acknowledgement %s: %s", result.Acknowledgement, closeOut)
+		}
+
+		ack := bdShow(t, bd, dir, result.Acknowledgement)
+		if !strings.Contains(ack.Description, oldDecision.Title) || !strings.Contains(ack.Description, newDecision.Title) {
+			t.Errorf("acknowledgement description should show both versions: %q", ack.Description)
+		}
+
+		bdClose(t, bd, dir, result.Acknowledgement, "--reason", "read v2")
+		bdClose(t, bd, dir, inProgress.ID)
+		if !readyIDs(t, bd, dir)[next.ID] {
+			t.Errorf("%s should be ready once the acknowledgement and its blocker close", next.ID)
+		}
+	})
+
+	t.Run("ack_without_open_dependents_creates_nothing", func(t *testing.T) {
+		oldIssue := bdCreate(t, bd, dir, "Ack lonely v1", "--type", "decision")
+		newIssue := bdCreate(t, bd, dir, "Ack lonely v2", "--type", "decision")
+		out, err := bdRunWithFlockRetry(t, bd, dir, "supersede", oldIssue.ID, "--with", newIssue.ID, "--ack", "--json")
+		if err != nil {
+			t.Fatalf("supersede --ack --json failed: %v\n%s", err, out)
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal(out, &m); err != nil {
+			t.Fatalf("parse: %v\n%s", err, out)
+		}
+		if _, ok := m["acknowledgement"]; ok {
+			t.Errorf("expected no acknowledgement without open dependents, got %v", m)
+		}
+		if blocked, ok := m["blocked"].([]interface{}); !ok || len(blocked) != 0 {
+			t.Errorf("expected blocked=[], got %v", m["blocked"])
+		}
+		if got := bdShow(t, bd, dir, oldIssue.ID); got.Status != "closed" {
+			t.Errorf("expected superseded issue closed, got %s", got.Status)
+		}
+	})
+
 	// ===== Error: same ID =====
 
 	t.Run("error_same_id", func(t *testing.T) {

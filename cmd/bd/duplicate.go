@@ -34,8 +34,14 @@ var supersedeCmd = &cobra.Command{
 The superseded issue is automatically closed with a reference to the replacement.
 Useful for design docs, specs, and evolving artifacts.
 
+With --ack, the command also creates an acknowledgement issue that blocks
+every open issue depending on the superseded issue through an edge of any
+type. Those dependents leave bd ready, and bd close refuses them, until the
+acknowledgement issue is closed. All of it is written in one transaction.
+
 Examples:
-  bd supersede bd-old --with bd-new    # Mark bd-old as superseded by bd-new`,
+  bd supersede bd-old --with bd-new          # Mark bd-old as superseded by bd-new
+  bd supersede bd-old --with bd-new --ack    # Also block bd-old's open dependents until acknowledged`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSupersede,
 }
@@ -43,6 +49,7 @@ Examples:
 var (
 	duplicateOf    string
 	supersededWith string
+	supersedeAck   bool
 )
 
 func init() {
@@ -53,6 +60,7 @@ func init() {
 
 	supersedeCmd.Flags().StringVar(&supersededWith, "with", "", "Replacement issue ID (required)")
 	_ = supersedeCmd.MarkFlagRequired("with") // Only fails if flag missing (caught in tests)
+	supersedeCmd.Flags().BoolVar(&supersedeAck, "ack", false, "Block the superseded issue's open dependents until a new acknowledgement issue is closed")
 	supersedeCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(supersedeCmd)
 }
@@ -165,6 +173,10 @@ func runSupersede(cmd *cobra.Command, args []string) error {
 	newIssue, err = store.GetIssue(ctx, newID)
 	if err != nil || newIssue == nil {
 		return fmt.Errorf("replacement issue not found: %s", newID)
+	}
+
+	if supersedeAck {
+		return runSupersedeWithAck(ctx, store, actor, oldID, newIssue)
 	}
 
 	// Add a "supersedes" dependency edge (old → new)
