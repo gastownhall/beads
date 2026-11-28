@@ -28,6 +28,7 @@ import (
 var _ storage.DoltStorage = (*EmbeddedDoltStore)(nil)
 var _ storage.StoreLocator = (*EmbeddedDoltStore)(nil)
 var _ storage.ActiveDatabaseSizer = (*EmbeddedDoltStore)(nil)
+var _ storage.BackupLister = (*EmbeddedDoltStore)(nil)
 var _ storage.GarbageCollector = (*EmbeddedDoltStore)(nil)
 var _ storage.FullGarbageCollector = (*EmbeddedDoltStore)(nil)
 var _ storage.Flattener = (*EmbeddedDoltStore)(nil)
