@@ -239,11 +239,14 @@ func checkDuplicateIssuesDB(db *sql.DB, orchestratorMode bool, orchestratorThres
 	}
 }
 
-// CheckTestPollution detects test issues that may have leaked into the database.
+// CheckTestPollution detects test issues that may have leaked into the
+// database. It counts what `bd doctor --check=pollution` reports: the same
+// candidates scored by the same DetectTestPollution, never a separate SQL
+// pattern list that drifts from it (GH#5025).
 func CheckTestPollution(path string) DoctorCheck {
 	beadsDir := ResolveBeadsDirForRepo(path)
 
-	db, store, err := openStoreDB(beadsDir)
+	_, store, err := openStoreDB(beadsDir)
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Test Pollution",
@@ -253,40 +256,7 @@ func CheckTestPollution(path string) DoctorCheck {
 	}
 	defer func() { _ = store.Close() }()
 
-	// Look for common test patterns in titles
-	query := `
-		SELECT COUNT(*) FROM issues
-		WHERE (
-			title LIKE 'test-%' OR
-			title LIKE 'Test Issue%' OR
-			title LIKE '%test issue%' OR
-			id LIKE 'test-%'
-		)
-	`
-	var count int
-	if err := db.QueryRow(query).Scan(&count); err != nil {
-		return DoctorCheck{
-			Name:    "Test Pollution",
-			Status:  StatusWarning,
-			Message: "N/A (query failed)",
-		}
-	}
-
-	if count == 0 {
-		return DoctorCheck{
-			Name:    "Test Pollution",
-			Status:  "ok",
-			Message: "No test pollution detected",
-		}
-	}
-
-	return DoctorCheck{
-		Name:    "Test Pollution",
-		Status:  "warning",
-		Message: fmt.Sprintf("%d potential test issue(s) detected", count),
-		Detail:  "Test issues may have leaked into production database",
-		Fix:     "Run 'bd doctor --check=pollution' to review and clean test issues",
-	}
+	return checkTestPollutionWithStore(context.Background(), store)
 }
 
 // CheckGitConflicts detects unresolved merge conflicts.
