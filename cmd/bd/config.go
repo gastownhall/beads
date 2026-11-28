@@ -1432,6 +1432,8 @@ var recognizedConfigKeys = map[string]bool{
 	"output.title-length": true,
 	"prime.max-memories":  true, "prime.max-memory-chars": true,
 	"prime.disabled": true,
+	// Per-repository opt-outs for git hook and .gitignore management (yaml-only).
+	config.HooksManageKey: true, config.GitignoreManageKey: true,
 	// Opt-in ceiling on the persistent-memory corpus, enforced by `bd
 	// remember` (0 = off). Yaml-only for the same reason the prime caps are:
 	// it is read through viper, so a DB-backed write would never be seen.

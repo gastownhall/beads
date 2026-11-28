@@ -7,9 +7,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // bdState runs "bd state" with the given args and returns stdout.
@@ -193,5 +197,92 @@ func TestEmbeddedStateConcurrent(t *testing.T) {
 		if r.err != nil && !strings.Contains(r.err.Error(), "one writer at a time") {
 			t.Errorf("worker %d failed: %v", r.worker, r.err)
 		}
+	}
+}
+
+// bdSetStateJSON runs "bd set-state ... --json" and returns the parsed
+// result object.
+func bdSetStateJSON(t *testing.T, bd, dir string, args ...string) map[string]interface{} {
+	t.Helper()
+	cmd := exec.Command(bd, append(append([]string{"set-state"}, args...), "--json")...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd set-state %s --json failed: %v\nstdout:\n%s\nstderr:\n%s",
+			strings.Join(args, " "), err, stdout.String(), stderr.String())
+	}
+	s := strings.TrimSpace(stdout.String())
+	start := strings.Index(s, "{")
+	if start < 0 {
+		t.Fatalf("no JSON object in set-state output: %s", s)
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(s[start:]), &m); err != nil {
+		t.Fatalf("parse set-state JSON: %v\n%s", err, s)
+	}
+	return m
+}
+
+// TestEmbeddedSetStateHealsADuplicatedDimension is GH#5657's AC-4: a
+// dimension left holding two values (the union a lost update wrote) is
+// healed to exactly the requested value by the first `bd set-state`, and the
+// immediate repeat reports no change WITHOUT minting a second event bead for
+// the same value.
+func TestEmbeddedSetStateHealsADuplicatedDimension(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "sr")
+
+	issue := bdCreate(t, bd, dir, "Heal a duplicated dimension", "--type", "task")
+	// The wedge: two values for one dimension, the state a lost update (or
+	// the retired two-write set-state) left behind.
+	for _, label := range []string{"state:b", "state:c", "keep"} {
+		bdLabel(t, bd, dir, "add", issue.ID, label)
+	}
+
+	stateEventCount := func() int {
+		count := 0
+		for _, child := range bdListJSON(t, bd, dir, "--parent", issue.ID, "--all") {
+			if child.IssueType == types.TypeEvent {
+				count++
+			}
+		}
+		return count
+	}
+
+	heal := bdSetStateJSON(t, bd, dir, issue.ID, "state=b")
+	if heal["changed"] != true {
+		t.Fatalf("healing run changed = %v, want true", heal["changed"])
+	}
+	labels := bdLabelListJSON(t, bd, dir, issue.ID)
+	sort.Strings(labels)
+	if want := []string{"keep", "state:b"}; !slices.Equal(labels, want) {
+		t.Fatalf("labels after heal = %v, want %v: the duplicate value survived", labels, want)
+	}
+	eventsAfterHeal := stateEventCount()
+	if eventsAfterHeal != 1 {
+		t.Fatalf("event beads after heal = %d, want 1", eventsAfterHeal)
+	}
+
+	// The repeat is a no-op: changed=false and no second event bead.
+	replay := bdSetStateJSON(t, bd, dir, issue.ID, "state=b")
+	if replay["changed"] != false {
+		t.Fatalf("replay changed = %v, want false", replay["changed"])
+	}
+	if _, present := replay["event_id"]; present {
+		t.Fatalf("replay minted an event bead (%v) for a value the issue already holds", replay["event_id"])
+	}
+	if got := stateEventCount(); got != eventsAfterHeal {
+		t.Fatalf("event beads after replay = %d, want %d", got, eventsAfterHeal)
+	}
+	labels = bdLabelListJSON(t, bd, dir, issue.ID)
+	sort.Strings(labels)
+	if want := []string{"keep", "state:b"}; !slices.Equal(labels, want) {
+		t.Fatalf("labels after replay = %v, want %v", labels, want)
 	}
 }

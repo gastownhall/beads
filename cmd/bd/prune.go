@@ -30,6 +30,13 @@ verification trails that downstream beads still cite. Use
 --ignore-references to override (e.g., when bulk-decommissioning a
 retired label across the rig).
 
+Also skips closed beads a live bead still depends on through a parent-child,
+tracks or blocks edge: a closed epic whose child is still open, a closed bead
+a live convoy tracks, a closed blocker of a live bead. Live means any status
+that is not done. When any are held back, --json reports the count as
+live_dependent_skipped. --ignore-references does not turn this off; to remove
+such a bead on purpose use ` + "`bd delete`" + `.
+
 To delete closed ephemeral beads (wisps, transient molecules) use
 ` + "`bd purge`" + ` instead.
 
@@ -74,7 +81,12 @@ EXAMPLES:
 			// asks the role NOT to protect. The reporting is unconditional, so
 			// `--json` keeps publishing the keys with the flag set.
 			protectReferenced: !ignoreRefs,
-			reportsReferences: true,
+			// A stored edge is a stronger pointer than an id in prose, and the
+			// text scan above does not see one: a child names its parent by a
+			// parent-child edge, not by citing it. Without this a prune deleted
+			// the closed parent of an open child and left the child a root.
+			protectLiveDependents: true,
+			reportsReferences:     true,
 		})
 	},
 }

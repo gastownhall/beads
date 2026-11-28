@@ -373,6 +373,14 @@ func TestExternalProviderRediscoversAfterProxyRetirement(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+
+	// The upstream's identity, asked of the upstream itself. The port the
+	// test dials is not one: the container backend publishes the server's
+	// 3306 on an ephemeral host port, so @@port reads 3306 on every path
+	// while upstreamPort is the mapped one. @@server_uuid is minted per
+	// server and reads the same on every path to it.
+	upstreamUUID := serverUUID(ctx, t, upstreamPort)
+
 	const database = "external_rediscovery"
 	provider, err := NewExternalDoltServerUOWProvider(ctx, storeRootDir, database,
 		filepath.Join(t.TempDir(), "server.log"),
@@ -396,15 +404,14 @@ func TestExternalProviderRediscoversAfterProxyRetirement(t *testing.T) {
 	defer func() { _ = tx.Rollback(request) }()
 	conn := tx.(*doltServerTx).conn
 
-	var gotDatabase, user, value string
-	var serverPort int
+	var gotDatabase, user, gotUUID, value string
 	require.NoError(t, conn.QueryRowContext(request,
-		"SELECT DATABASE(), CURRENT_USER(), @@port, value FROM rediscovery_probe WHERE id = 1",
-	).Scan(&gotDatabase, &user, &serverPort, &value))
+		"SELECT DATABASE(), CURRENT_USER(), @@server_uuid, value FROM rediscovery_probe WHERE id = 1",
+	).Scan(&gotDatabase, &user, &gotUUID, &value))
 	assert.Equal(t, database, gotDatabase)
 	assert.Equal(t, "persisted before idle", value)
 	assert.Contains(t, user, "root@", "credentials")
-	assert.Equal(t, upstreamPort, serverPort, "the rediscovered proxy must front the original external upstream")
+	assert.Equal(t, upstreamUUID, gotUUID, "the rediscovered proxy must front the original external upstream")
 	// A no-op UPDATE reports its matched row only under ClientFoundRows, which
 	// the provider's writes rely on.
 	res, err := conn.ExecContext(request, "UPDATE rediscovery_probe SET value = value WHERE id = 1")
@@ -418,6 +425,19 @@ func TestExternalProviderRediscoversAfterProxyRetirement(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, fresh)
 	assert.NotEqual(t, old.Port, fresh.Port, "replacement proxy port")
+}
+
+// serverUUID dials the Dolt server on 127.0.0.1:port directly, with no proxy in
+// between, and returns its @@server_uuid.
+func serverUUID(ctx context.Context, t *testing.T, port int) string {
+	t.Helper()
+	direct, err := sql.Open("mysql", fmt.Sprintf("root:@tcp(127.0.0.1:%d)/", port))
+	require.NoError(t, err)
+	defer func() { _ = direct.Close() }()
+	var uuid string
+	require.NoError(t, direct.QueryRowContext(ctx, "SELECT @@server_uuid").Scan(&uuid))
+	require.NotEmpty(t, uuid, "the server reported no @@server_uuid")
+	return uuid
 }
 
 // TestExternalDoltServerOpenRefusesForwardDrift is the end-to-end leg of
