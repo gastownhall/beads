@@ -457,11 +457,16 @@ func TestMigrateToServer_RefusesWhenLifecycleLockHeld(t *testing.T) {
 			held, err := util.TryLock(tc.rel(beadsDir))
 			require.NoError(t, err)
 
-			require.Error(t, runMigrateFromProxiedServer(false, false), "must refuse while %s is held", tc.name)
+			var refusal error
+			stderr := captureStderr(t, func() { refusal = runMigrateFromProxiedServer(false, false) })
+			require.Error(t, refusal, "must refuse while %s is held", tc.name)
+			assert.Contains(t, stderr, "is still running", "contention must keep the lifecycle diagnostic")
+			assert.Contains(t, stderr, "bd dolt stop")
 
 			cfg, err := configfile.Load(beadsDir)
 			require.NoError(t, err)
 			assert.True(t, cfg.IsDoltProxiedServerMode(), "mode must be unchanged when blocked")
+			assert.NoFileExists(t, migrateJournalPath(beadsDir), "no journal is written when blocked")
 
 			held.Unlock()
 			require.NoError(t, runMigrateFromProxiedServer(false, false), "must succeed once %s is released", tc.name)

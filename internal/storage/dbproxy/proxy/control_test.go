@@ -7,6 +7,8 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +20,20 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPurgeControlFilesReportsRemovalError(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, LogFileName)
+	require.NoError(t, os.Mkdir(path, 0700))
+	child := filepath.Join(path, "retain")
+	require.NoError(t, os.WriteFile(child, []byte("retain"), 0600))
+	errs := PurgeControlFiles(root)
+	require.Len(t, errs, 1)
+	var pathErr *os.PathError
+	require.ErrorAs(t, errs[0], &pathErr)
+	assert.Equal(t, path, pathErr.Path)
+	assert.FileExists(t, child)
+}
 
 func newControlServer(t *testing.T) (*controlServer, string, identity.IdentReply) {
 	t.Helper()
