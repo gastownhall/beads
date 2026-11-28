@@ -41,6 +41,10 @@ func launchServer(cmd *exec.Cmd) (*startedServer, error) {
 	return s, nil
 }
 
+// startServerProcess is the launchServer Start runs its dolt sql-server with.
+// A var so tests can act between the launch and its launch record.
+var startServerProcess = launchServer
+
 // launchedHere reports whether pid is a dolt sql-server this process launched
 // and has not seen exit. That identifies the server Start recorded without
 // the process list, which a sandbox can refuse (GH#7214).
@@ -95,6 +99,7 @@ func writeServerStateFiles(beadsDir string, pid, port int) error {
 func removeServerStateFiles(beadsDir string) {
 	_ = os.Remove(pidPath(beadsDir))
 	_ = os.Remove(portPath(beadsDir))
+	_ = os.Remove(binaryRecordPath(beadsDir))
 }
 
 // pinnedPortRemedy says why Start did not move off port, which another
