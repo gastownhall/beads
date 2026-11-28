@@ -491,6 +491,54 @@ func guardInitInHomeDir() (keepHomeClean bool, err error) {
 	return false, &exitError{Code: ExitHomeDirRefused}
 }
 
+// guardInitBeadsDirAtProjectRoot refuses `bd init` when BEADS_DIR names a
+// project root whose .beads directory already holds a workspace (GH#7034).
+//
+// An explicit BEADS_DIR is authoritative: init initializes the directory it
+// names. Naming the project root instead of its .beads is the usual slip, and
+// init then wrote metadata.json, config.yaml, README.md and a second database
+// into the project root, beside the real workspace, and exited 0. Before
+// BEADS_DIR became authoritative, discovery walked up, found the real
+// workspace, and init stopped with "already initialized".
+//
+// It reads the live BEADS_DIR, the same value RunE resolves init's target
+// from, so it judges exactly the directory init is about to write into. A
+// beads dir the root pre-run exported for itself came from discovery, which
+// returns a directory named .beads or a redirect's target, and the helper
+// never reports a directory named .beads or one holding beads metadata.
+//
+// Like guardInitInHomeDir this runs ahead of everything with an effect, the
+// proxied dispatch included, so both init routes refuse before they create
+// anything.
+func guardInitBeadsDirAtProjectRoot() error {
+	named := os.Getenv("BEADS_DIR")
+	workspace, ok := beads.ProjectRootNamedAsBeadsDir(named)
+	if !ok {
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "%s\n", beadsDirAtProjectRootRefusalMessage(named, workspace))
+	return &exitError{Code: 1}
+}
+
+// beadsDirAtProjectRootRefusalMessage is the What/Why/Next refusal text for a
+// `bd init` whose BEADS_DIR names a project root instead of its .beads.
+//
+// The remedy names the value to set instead of printing a command to paste:
+// the per-command form (BEADS_DIR=<dir> bd ...) exists only in POSIX shells.
+func beadsDirAtProjectRootRefusalMessage(named, workspace string) string {
+	return fmt.Sprintf(`bd init refuses: BEADS_DIR names %s, which holds no beads workspace, but %s does.
+
+  Why: BEADS_DIR names the .beads directory itself, not the project that
+       contains it. Initializing here would write a second workspace into
+       the project root, beside the one that is already there.
+
+  Next:
+    To use the existing workspace, set BEADS_DIR to
+      %s
+    or unset BEADS_DIR and run bd from inside the project.`,
+		remedy.PrintedValue(named), remedy.PrintedValue(workspace), remedy.PrintedValue(workspace))
+}
+
 // homeDirRefusalMessage is the What/Why/Next refusal text for a `bd init` run
 // directly in an untracked home directory.
 //
@@ -578,6 +626,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		keepHomeClean, homeErr := guardInitInHomeDir()
 		if homeErr != nil {
 			return homeErr
+		}
+		// Next, still before anything with an effect: a BEADS_DIR that names
+		// the project root of an initialized workspace is a slip, not a
+		// request for a second workspace there (GH#7034).
+		if rootErr := guardInitBeadsDirAtProjectRoot(); rootErr != nil {
+			return rootErr
 		}
 
 		prefix, _ := cmd.Flags().GetString("prefix")

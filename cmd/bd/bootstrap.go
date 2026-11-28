@@ -199,6 +199,32 @@ Examples:
 			}
 		}
 
+		// GH#7034: a BEADS_DIR that names the project root of an initialized
+		// workspace is a slip for its .beads, not a place to set a database
+		// up. Discovery returns such a root as the workspace when it holds a
+		// config.yaml, a metadata.json or a database file of its own, and the
+		// refs/dolt/data branch below takes it as the target when discovery
+		// returns nothing. Either way the plan then ran against the root with
+		// the metadata of the workspace in the root's parent directory, if
+		// one was there, and created or cloned a database beside the real
+		// one. A config.json of the project's own in the root was loaded as
+		// legacy metadata and replaced by a metadata.json, by --dry-run too.
+		// Bootstrap refuses as every other command run there does, with the
+		// note that names the directory meant, ahead of discovery, the
+		// metadata load and the repair. The root pre-run has by then read
+		// the root's config.yaml and .env where discovery takes the root for
+		// a workspace; it writes nothing.
+		if workspace, slip := beads.ProjectRootNamedAsBeadsDir(os.Getenv("BEADS_DIR")); slip {
+			if jsonOutput {
+				if err := outputJSON(beadsDirAtProjectRootBootstrapPayload(os.Getenv("BEADS_DIR"), workspace)); err != nil {
+					return err
+				}
+				return SilentExit()
+			}
+			printNoDatabaseRefusal()
+			return SilentExit()
+		}
+
 		// Find beads directory
 		beadsDir := beads.FindBeadsDir()
 		if beadsDir == "" {
@@ -429,6 +455,18 @@ func noWorkspaceBootstrapPayload() map[string]interface{} {
 		"reason":     activeWorkspaceNotFoundError(),
 		"suggestion": diagHint(),
 	}
+}
+
+// beadsDirAtProjectRootBootstrapPayload is the --json form of the refusal for
+// a BEADS_DIR that names a project root, named, when the workspace is in the
+// .beads directory inside it, workspace (GH#7034). It is the no-workspace
+// payload, with a suggestion that names the directory meant in place of one
+// that says to run bd init.
+func beadsDirAtProjectRootBootstrapPayload(named, workspace string) map[string]interface{} {
+	payload := noWorkspaceBootstrapPayload()
+	payload["suggestion"] = "BEADS_DIR is set to " + remedy.PrintedValue(named) +
+		", which holds no beads workspace; set it to " + remedy.PrintedValue(workspace) + ", or unset it"
+	return payload
 }
 
 func requireBootstrapDoltBackend(cfg *configfile.Config, beadsDir string) error {
