@@ -411,6 +411,28 @@ func runCook(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	if flags.runtimeMode {
+		// Apply step condition filtering, matching bd mol pour's
+		// resolveAndCookFormulaWithVars (cook.go's own conditionVars arm
+		// below). Without this, cook's output still includes a step whose
+		// condition evaluates false for the given vars, while pour
+		// correctly omits it (GH#7639).
+		mergedVars := make(map[string]string)
+		for name, def := range resolved.Vars {
+			if def != nil && def.Default != nil {
+				mergedVars[name] = *def.Default
+			}
+		}
+		for k, v := range flags.inputVars {
+			mergedVars[k] = v
+		}
+		filteredSteps, err := formula.FilterStepsByCondition(resolved.Steps, mergedVars)
+		if err != nil {
+			return HandleError("%v", err)
+		}
+		resolved.Steps = filteredSteps
+	}
+
 	if flags.dryRun {
 		outputCookDryRun(resolved, protoID, flags.runtimeMode, flags.inputVars, vars, bondPoints)
 		return nil
