@@ -690,3 +690,42 @@ func TestInitArtifactCommitLeavesPreStagedWork(t *testing.T) {
 		t.Errorf("pre-staged work after init = %q, want it still staged", got)
 	}
 }
+
+// TestInitArtifactCommitWithNothingStagedLeavesPreStagedWork pins the corner of
+// GH#5654 that gitignore.manage: false opens. A repository that keeps its own
+// ignore rules can exclude every file bd init writes. Init then stages
+// nothing, and a commit with no paths would not be scoped: it would take the
+// caller's staged work as the init commit. No commit is made and that work
+// stays staged.
+func TestInitArtifactCommitWithNothingStagedLeavesPreStagedWork(t *testing.T) {
+	clearManageEnvForTest(t)
+	target, _, _ := newInitRoleFixture(t)
+	initRoleFixtureGit(t, target, "config", "user.name", "Artifact Fixture")
+	initRoleFixtureGit(t, target, "config", "user.email", "artifact-fixture")
+	initRoleFixtureGit(t, target, "config", "commit.gpgSign", "false")
+	for path, content := range map[string]string{
+		"work.txt":             "work\n",
+		".gitignore":           ".beads/\n",
+		".beads/config.yaml":   manageGitignoreOff,
+		".beads/metadata.json": "{}\n",
+		".beads/README.md":     "# beads\n",
+	} {
+		full := filepath.Join(target, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	initRoleFixtureGit(t, target, "add", "work.txt")
+
+	commitEmbeddedInitArtifacts(target, true)
+
+	if got := initRoleFixtureGit(t, target, "rev-list", "--all", "--count"); got != "0" {
+		t.Errorf("commits after init = %s, want 0: nothing of init's was staged", got)
+	}
+	if got := initRoleFixtureGit(t, target, "diff", "--cached", "--name-only"); got != "work.txt" {
+		t.Errorf("pre-staged work after init = %q, want it still staged", got)
+	}
+}

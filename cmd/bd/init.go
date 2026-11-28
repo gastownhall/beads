@@ -4708,8 +4708,8 @@ func stageInitBeadsArtifacts(workDir string, gitignoreManaged bool) ([]string, b
 // #nosec G702 -- no shell is involved: the binary is the literal "git" and
 // every argument is its own argv element. Callers pass constant subcommands
 // and flags; the only variable arguments are init-owned artifact paths, which
-// commitEmbeddedInitArtifacts places after a "--" terminator so git reads them
-// as pathspecs and never as options.
+// commitEmbeddedInitArtifacts and stageInitBeadsArtifacts place after a "--"
+// terminator so git reads them as pathspecs and never as options.
 func initArtifactGitCommand(workDir string, args ...string) *exec.Cmd {
 	cmd := exec.Command("git", args...)
 	cmd.Dir, cmd.Env = workDir, gitenv.ScrubRouting(os.Environ())
