@@ -382,3 +382,63 @@ func TestResetRolePreservesSelectedGitContext(t *testing.T) {
 		})
 	}
 }
+
+// TestResetRoleProbeExitOneWithDiagnosticIsAFailure pins bd-a2qnf4
+// (GH#6765): git exits 1 for some failed reads too, but with a diagnostic.
+// Uninstall must report that failure and leave the role alone, not treat the
+// exit status alone as "absent" and report a clean uninstall.
+func TestResetRoleProbeExitOneWithDiagnosticIsAFailure(t *testing.T) {
+	configPath := roleReadFailureRepoForTest(t)
+	repo := filepath.Dir(filepath.Dir(configPath))
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := gitCommand(args...)
+		cmd.Dir, cmd.Env = repo, gitenv.ScrubRouting(os.Environ())
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("fixture git %v: %v: %s", args, err, out)
+		}
+	}
+	runGit("config", "--local", "beads.role", "maintainer")
+	installRoleReadFailingGitForTest(t, 1)
+	before := readFileForTest(t, configPath)
+
+	err := resetHooksPathAt(repo, filepath.Join(repo, ".git"), filepath.Join(repo, ".beads", "hooks"), gitenv.ScrubRouting(os.Environ()))
+	if err == nil || !strings.Contains(err.Error(), "read beads.role") || !strings.Contains(err.Error(), "bad config") {
+		t.Errorf("reset = %v; want the role read failure with git's diagnostic", err)
+	}
+	if after := readFileForTest(t, configPath); after != before {
+		t.Errorf("reset changed config after a failed role read:\n%s", after)
+	}
+}
+
+// TestResetRoleProbeUnderStderrTracing is the benign-noise control for the
+// test above (GH#6763): git traces even an unset key's lookup to stderr, so
+// with tracing inherited the probe must still take an unset role as a clean
+// reset, and still unset a role that is there.
+func TestResetRoleProbeUnderStderrTracing(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		roleSet bool
+	}{{"unset role", false}, {"set role", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath := roleReadFailureRepoForTest(t)
+			repo := filepath.Dir(filepath.Dir(configPath))
+			if tc.roleSet {
+				cmd := gitCommand("config", "--local", "beads.role", "maintainer")
+				cmd.Dir, cmd.Env = repo, gitenv.ScrubRouting(os.Environ())
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("fixture git config: %v: %s", err, out)
+				}
+			}
+			t.Setenv("GIT_TRACE", "1")
+
+			err := resetHooksPathAt(repo, filepath.Join(repo, ".git"), filepath.Join(repo, ".beads", "hooks"), gitenv.ScrubRouting(os.Environ()))
+			if err != nil {
+				t.Errorf("reset = %v; want a clean reset", err)
+			}
+			if after := readFileForTest(t, configPath); strings.Contains(after, "role") {
+				t.Errorf("reset left beads.role set:\n%s", after)
+			}
+		})
+	}
+}

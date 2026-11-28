@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -753,6 +754,84 @@ func TestDetectUserRoleForActiveRepoWarnsWhenRolePathIsNotARepo(t *testing.T) {
 	}
 }
 
+// malformGitConfigForTest appends an unterminated section header to repo's
+// local config, so every `git config --get` there fails with git's "bad config
+// line" diagnostic (exit 128) rather than reporting the key absent.
+func malformGitConfigForTest(t *testing.T, repo string) string {
+	t.Helper()
+	path := filepath.Join(repo, ".git", "config")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read git config: %v", err)
+	}
+	data = append(data, "\n[beads\n\trole = maintainer\n"...)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write malformed git config: %v", err)
+	}
+	return path
+}
+
+// resetRoleReadFailureWarningForTest re-arms the once-per-process routing
+// warning for a failed beads.role read.
+func resetRoleReadFailureWarningForTest(t *testing.T) {
+	t.Helper()
+	old := roleReadFailedWarned
+	roleReadFailedWarned = false
+	t.Cleanup(func() { roleReadFailedWarned = old })
+}
+
+// TestDetectUserRoleForRoutingReportsRoleReadFailureOnce pins the CLI half of
+// bd-a2qnf4 (GH#6765): when git fails the beads.role read, role-dependent
+// routing warns once per invocation and takes the default route, instead of
+// logging the failure only under debug and routing by a guessed role.
+func TestDetectUserRoleForRoutingReportsRoleReadFailureOnce(t *testing.T) {
+	resetRepoContextCachesForTest(t)
+	resetRolePathWarningForTest(t)
+	resetRoleReadFailureWarningForTest(t)
+
+	repo := filepath.Join(t.TempDir(), "repo")
+	initGitRepoForContextTest(t, repo)
+	beadsDir := filepath.Join(repo, ".beads")
+	writeTestConfigYAML(t, beadsDir, "")
+	malformGitConfigForTest(t, repo)
+
+	t.Chdir(repo)
+	t.Setenv("BEADS_DIR", beadsDir)
+	setBeadsDirStartupProvenanceForTest(t, false)
+	setChangeDirForTest(t, "")
+
+	cfg := &routing.RoutingConfig{
+		Mode:            "auto",
+		DefaultRepo:     "/default-repo",
+		MaintainerRepo:  "/maintainer-repo",
+		ContributorRepo: "/contributor-repo",
+	}
+	if !cfg.UsesUserRole() {
+		t.Fatal("fixture routing config must depend on the role")
+	}
+	stderr := captureStderr(t, func() {
+		// An ID lookup re-runs role detection once per missing ID.
+		for range 3 {
+			role := detectUserRoleForRouting(cfg)
+			if role != "" {
+				t.Errorf("detectUserRoleForRouting = %q, want empty after a failed read", role)
+			}
+			if got := routing.DetermineTargetRepo(cfg, role, "."); got != cfg.DefaultRepo {
+				t.Errorf("route = %q, want the default route %q", got, cfg.DefaultRepo)
+			}
+		}
+	})
+	if n := strings.Count(stderr, "could not read beads.role"); n != 1 {
+		t.Errorf("role read failure reported %d times, want once; stderr:\n%s", n, stderr)
+	}
+	if !strings.Contains(stderr, "bad config") {
+		t.Errorf("warning does not carry git's diagnostic; stderr:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "not configured") {
+		t.Errorf("failed read reported as a missing role; stderr:\n%s", stderr)
+	}
+}
+
 // TestActiveRepoPathForRoutingHonorsChangeDirSelectionOfNonGitProject pins
 // the routing knock-on of GH#5700: `bd -C T` from git repository A, with T in
 // no repository, must read the role at T (with the one-time non-repo warning),
@@ -956,4 +1035,84 @@ func TestPrepareSelectedCommandContext_DoesNotMergeCallerConfigForUnsetKeys(t *t
 	if actor != "target-actor" {
 		t.Fatalf("actor = %q, want %q", actor, "target-actor")
 	}
+}
+
+// TestContextReportsRoleReadFailure pins bd-a2qnf4 (GH#6765) for bd context:
+// when git cannot read beads.role, both routes still answer successfully in
+// both output modes, omit the role, and print git's diagnostic on stderr.
+func TestContextReportsRoleReadFailure(t *testing.T) {
+	beadsDir := roleContextWorkspaceForTest(t, malformedRoleRepoForConfigTest(t))
+
+	routes := map[string]func() error{
+		"direct":  func() error { return contextCmd.RunE(contextCmd, nil) },
+		"proxied": func() error { return runContextProxiedServer(contextCmd, context.Background()) },
+	}
+	for name, run := range routes {
+		for _, asJSON := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%v", name, asJSON), func(t *testing.T) {
+				pinJSONOutput(t, asJSON)
+				stdout, stderr, err := captureStdoutAndStderr(t, run)
+				if err != nil {
+					t.Fatalf("bd context = %v, want success", err)
+				}
+				if !strings.Contains(stdout, beadsDir) {
+					t.Errorf("stdout %q lost the workspace snapshot", stdout)
+				}
+				if strings.Contains(stdout, "role") {
+					t.Errorf("stdout %q reports a role git could not read", stdout)
+				}
+				if got := strings.Count(stderr, "bad config"); got != 1 {
+					t.Errorf("stderr %q: diagnostic printed %d times, want 1", stderr, got)
+				}
+			})
+		}
+	}
+}
+
+// TestContextWithoutGitDoesNotWarnAboutTheRole pins git-free usage for
+// bd context: with no git executable there is no role to read, so neither
+// route warns about one on every run (routing takes it as unset too).
+func TestContextWithoutGitDoesNotWarnAboutTheRole(t *testing.T) {
+	beadsDir := roleContextWorkspaceForTest(t, filepath.Dir(filepath.Dir(roleReadFailureRepoForTest(t))))
+	t.Setenv("PATH", t.TempDir())
+
+	routes := map[string]func() error{
+		"direct":  func() error { return contextCmd.RunE(contextCmd, nil) },
+		"proxied": func() error { return runContextProxiedServer(contextCmd, context.Background()) },
+	}
+	for name, run := range routes {
+		t.Run(name, func(t *testing.T) {
+			pinJSONOutput(t, false)
+			stdout, stderr, err := captureStdoutAndStderr(t, run)
+			if err != nil {
+				t.Fatalf("bd context = %v, want success", err)
+			}
+			if !strings.Contains(stdout, beadsDir) {
+				t.Errorf("stdout %q lost the workspace snapshot", stdout)
+			}
+			if strings.Contains(stderr, "role") {
+				t.Errorf("stderr %q warns about a role there is no git to read", stderr)
+			}
+		})
+	}
+}
+
+// roleContextWorkspaceForTest makes repo's .beads, with a default config, the
+// workspace bd context resolves from the working directory, and returns it.
+func roleContextWorkspaceForTest(t *testing.T, repo string) string {
+	t.Helper()
+	t.Setenv("BEADS_DIR", "")
+	if err := os.Unsetenv("BEADS_DIR"); err != nil {
+		t.Fatal(err)
+	}
+	setBeadsDirStartupProvenanceForTest(t, false)
+	beadsDir := filepath.Join(repo, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := configfile.DefaultConfig().Save(beadsDir); err != nil {
+		t.Fatal(err)
+	}
+	resetRepoContextCachesForTest(t)
+	return beadsDir
 }

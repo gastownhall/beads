@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/execenv"
+	"github.com/steveyegge/beads/internal/gittraceenv"
 )
 
 var routingKeys = map[string]struct{}{
@@ -115,6 +116,20 @@ func ScrubRoutingAndSuppression(env []string) []string {
 // boundary also stops them from disagreeing about which config file they mean.
 func ScrubRoutingAndSuppressionForOS(env []string, goos string) []string {
 	return scrubRoutingForOS(env, goos, false)
+}
+
+// ScrubRoleRead is the environment for a beads.role read:
+// ScrubRoutingAndSuppression, plus the git tracing that writes to stderr
+// (gittraceenv.ScrubEnv). Git exits 1 both for an unset key and for some reads
+// it failed, and only the failure carries a diagnostic, so role readers tell
+// the two apart by stderr (internal/git.ClassifyConfigGet). Git traces even an
+// unset key's lookup to stderr, so an inherited GIT_TRACE=1 would otherwise
+// turn every unset role into a read failure (GH#6763). Tracing to a file is
+// kept, as gittraceenv keeps it. Tracing never changes which config file git
+// reads or writes, so a write that shares a reader's environment can take
+// this one too.
+func ScrubRoleRead(env []string) []string {
+	return gittraceenv.ScrubEnv(ScrubRoutingAndSuppression(env))
 }
 
 func scrubRoutingForOS(env []string, goos string, keepSuppression bool) []string {

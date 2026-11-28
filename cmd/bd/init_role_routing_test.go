@@ -90,7 +90,7 @@ func TestBeadsRoleWriterIgnoresInheritedGitRouting(t *testing.T) {
 		if got := localRole(t, decoy); got != "maintainer" {
 			t.Fatalf("decoy fixture beads.role = %q, want %q", got, "maintainer")
 		}
-		role, hasRole := getBeadsRole()
+		role, hasRole, _ := getBeadsRole()
 		if hasRole {
 			t.Errorf("getBeadsRole() = %q, true; want unset: the read followed an inherited GIT_DIR", role)
 		}
@@ -123,7 +123,7 @@ func TestBeadsRoleWriterIgnoresInheritedGitRouting(t *testing.T) {
 				if tc.blind != "" {
 					t.Setenv("GIT_CONFIG_GLOBAL", tc.blind)
 				}
-				role, hasRole := getBeadsRole()
+				role, hasRole, _ := getBeadsRole()
 				if !hasRole || role != "contributor" {
 					t.Errorf("getBeadsRole() = %q, %t; want %q, true: a blinded read is what makes init write a default role", role, hasRole, "contributor")
 				}
