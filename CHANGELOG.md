@@ -2061,6 +2061,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rolled-back ID. When the transaction rolled back they are now empty again;
   an error wrapping `storage.ErrCommitIndeterminate` keeps them. `bd create`
   was not affected.
+- `bd setup junie` no longer writes an MCP config that runs `bd mcp`, a
+  command bd has never had, so Junie's beads MCP server failed to start
+  (GH#5563). `.junie/mcp/mcp.json` now launches the `beads-mcp` server with
+  `uvx beads-mcp`, as the Junie integration page already advised; re-run
+  `bd setup junie` to replace an existing config.
 
 - **bd again reads `GT_ROOT` from a rig's `.beads/.env`** (#8117; also
   shipped in 1.3.4). `gc rig add` writes the city root there, and the
