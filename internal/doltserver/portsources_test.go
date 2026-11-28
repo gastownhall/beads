@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
 )
 
 // isolateUserConfig points the user-level config locations (HOME, XDG, and
@@ -311,4 +313,124 @@ func TestResolversLeaveLegacyConfigJSONUnchanged(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCentralConfigPortIsTheLastPortStep pins GH#3895's port step: the central
+// server config's dolt_server_port (server.json, or the file
+// BEADS_CENTRAL_CONFIG names) is the port DialConfig and ResolveEndpoint
+// resolve when no other source names one, with source central_config. Every
+// other source still wins, the legacy BEADS_DOLT_PORT does not replace it, and
+// the password is the credentials-file entry for that host and port.
+func TestCentralConfigPortIsTheLastPortStep(t *testing.T) {
+	const centralPort = 5100
+	setup := func(t *testing.T, centralBody string) string {
+		t.Helper()
+		beadsDir := endpointTestEnv(t, map[string]string{
+			"db.invalid:5100": "central-5100",
+			"db.invalid:3307": "wrong-3307",
+			"db.invalid:0":    "wrong-0",
+		})
+		t.Setenv("BEADS_DIR", "")
+		writeEndpointMetadata(t, beadsDir, &configfile.Config{DoltMode: configfile.DoltModeServer, DoltDatabase: "central"})
+		centralPath := filepath.Join(t.TempDir(), "server.json")
+		if err := os.WriteFile(centralPath, []byte(centralBody), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_CENTRAL_CONFIG", centralPath)
+		return beadsDir
+	}
+	const hostAndPort = `{"dolt_server_host":"db.invalid","dolt_server_port":5100}`
+	const portOnly = `{"dolt_server_port":5100}`
+
+	t.Run("fills a port nothing else names", func(t *testing.T) {
+		beadsDir := setup(t, hostAndPort)
+		cfg := DialConfig(beadsDir)
+		if cfg.Port != centralPort || cfg.PortSource != PortSourceCentralConfig {
+			t.Errorf("DialConfig port=%d source=%q, want %d/%q", cfg.Port, cfg.PortSource, centralPort, PortSourceCentralConfig)
+		}
+		if got := DefaultConfigForMode(beadsDir, false); got.Port != centralPort || got.PortSource != PortSourceCentralConfig {
+			t.Errorf("DefaultConfigForMode port=%d source=%q, want %d/%q", got.Port, got.PortSource, centralPort, PortSourceCentralConfig)
+		}
+		ep := ResolveEndpoint(beadsDir, nil)
+		if ep.Host != "db.invalid" || ep.Port != centralPort {
+			t.Errorf("ResolveEndpoint = %s:%d, want db.invalid:%d", ep.Host, ep.Port, centralPort)
+		}
+		if got := ep.Password(); got != "central-5100" {
+			t.Errorf("password = %q, want the [db.invalid:5100] entry", got)
+		}
+	})
+
+	t.Run("legacy BEADS_DOLT_PORT does not replace it", func(t *testing.T) {
+		beadsDir := setup(t, hostAndPort)
+		t.Setenv("BEADS_DOLT_PORT", "5200")
+		if cfg := DialConfig(beadsDir); cfg.Port != centralPort || cfg.PortSource != PortSourceCentralConfig {
+			t.Errorf("DialConfig port=%d source=%q, want %d/%q", cfg.Port, cfg.PortSource, centralPort, PortSourceCentralConfig)
+		}
+	})
+
+	for _, tc := range []struct {
+		name   string
+		apply  func(t *testing.T, beadsDir string)
+		port   int
+		source PortSource
+	}{
+		{"BEADS_DOLT_SERVER_PORT", func(t *testing.T, _ string) { t.Setenv("BEADS_DOLT_SERVER_PORT", "5201") }, 5201, PortSourceEnv},
+		{"bd-host port file", func(t *testing.T, beadsDir string) {
+			if err := writePortFile(beadsDir, 5202); err != nil {
+				t.Fatal(err)
+			}
+		}, 5202, PortSourcePortFile},
+		{"listener.port", func(t *testing.T, beadsDir string) {
+			doltDir := filepath.Join(beadsDir, "dolt")
+			if err := os.MkdirAll(doltDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(doltDir, "config.yaml"), []byte("listener:\n  host: 127.0.0.1\n  port: 5203\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, 5203, PortSourceDoltConfigYaml},
+		{"dolt.port", func(t *testing.T, _ string) {
+			configDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("dolt.port: 5204\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("BEADS_DIR", configDir)
+			if err := config.Initialize(); err != nil {
+				t.Fatalf("config.Initialize: %v", err)
+			}
+		}, 5204, PortSourceConfigYaml},
+		{"metadata.json dolt_server_port", func(t *testing.T, beadsDir string) {
+			writeEndpointMetadata(t, beadsDir, &configfile.Config{DoltMode: configfile.DoltModeServer, DoltDatabase: "central", DoltServerPort: 5205})
+		}, 5205, PortSourceMetadataJSON},
+	} {
+		t.Run(tc.name+" wins", func(t *testing.T) {
+			beadsDir := setup(t, portOnly)
+			tc.apply(t, beadsDir)
+			if cfg := DialConfig(beadsDir); cfg.Port != tc.port || cfg.PortSource != tc.source {
+				t.Errorf("DialConfig port=%d source=%q, want %d/%q", cfg.Port, cfg.PortSource, tc.port, tc.source)
+			}
+			if ep := ResolveEndpoint(beadsDir, nil); ep.Port != tc.port {
+				t.Errorf("ResolveEndpoint port=%d, want %d", ep.Port, tc.port)
+			}
+		})
+	}
+
+	t.Run("shared-server mode keeps its own default", func(t *testing.T) {
+		beadsDir := setup(t, portOnly)
+		t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+		if cfg := DialConfig(beadsDir); cfg.Port != DefaultSharedServerPort {
+			t.Errorf("shared mode DialConfig port=%d source=%q, want %d", cfg.Port, cfg.PortSource, DefaultSharedServerPort)
+		}
+		if cfg := DefaultConfigForMode(beadsDir, true); cfg.Port != DefaultSharedServerPort {
+			t.Errorf("shared mode DefaultConfigForMode port=%d source=%q, want %d", cfg.Port, cfg.PortSource, DefaultSharedServerPort)
+		}
+	})
+
+	t.Run("bd dolt show lists it last", func(t *testing.T) {
+		labels := PortSourceLabels()
+		if last := labels[len(labels)-1]; !strings.Contains(last, "server.json") {
+			t.Errorf("last port source label = %q, want the central server config (server.json)", last)
+		}
+	})
 }
