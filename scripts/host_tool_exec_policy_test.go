@@ -52,8 +52,9 @@ package scripts_test
 //   - its "prebuilt binary path" comes from findPrebuiltBDBinary()/
 //     bazeltest.PrebuiltBD(), checked against "" as above, ONLY when that
 //     call's error result is bound to a named variable (not discarded via
-//     `_`) that is itself checked with an aborting `if err != nil` — an
-//     ignored error breaks the "never empty under Bazel" invariant the
+//     `_`) that is itself checked with an aborting `if err != nil` after
+//     the lookup and before the exec — an ignored error breaks the
+//     "never empty under Bazel" invariant the
 //     check otherwise relies on (gastownhall/beads#7491 review, "M19"): see
 //     prebuiltResultVars;
 //   - the enclosing function is itself named (not a func literal) and is
@@ -155,7 +156,7 @@ func newFuncScopes(file *ast.File) *funcScopes {
 	}
 
 	gated := func(scope ast.Node, pos token.Pos) bool {
-		prebuiltVars := prebuiltResultVars(scope)
+		prebuiltVars := prebuiltResultVars(scope, pos)
 		found := false
 		ast.Inspect(scope, func(n ast.Node) bool {
 			// Do not descend into a nested func literal: its gate (or lack
@@ -239,7 +240,7 @@ func newFuncScopes(file *ast.File) *funcScopes {
 // this policy recognizes at all (matched). prebuiltVars names local variables
 // already known (via prebuiltResultVars) to hold a findPrebuiltBDBinary()/
 // bazeltest.PrebuiltBD() result: under Bazel that call either errors (an
-// abort in its own right, wherever the caller checks it) or returns a
+// abort when the caller checks it before the exec) or returns a
 // non-empty path (bazeltest.PrebuiltBD, internal/testutil/bazeltest/
 // bazeltest.go), so it is never "" under Bazel. Recognized forms:
 //   - bazeltest.IsBazel() (or any x.IsBazel()): true under Bazel.
@@ -318,8 +319,8 @@ func isPrebuiltVarIdent(e ast.Expr, prebuiltVars map[string]bool) bool {
 // call to findPrebuiltBDBinary() or (any x.)PrebuiltBD(), returning the set
 // of local names bound to the call's first result -- the "prebuilt binary
 // path, or \"\"" value -- for assignments where the call's error result is
-// actually checked. A caller that checks `name != ""` and aborts when true
-// is gated: see condPolarity.
+// checked after the lookup and before pos. A caller that checks `name != ""`
+// and aborts when true is gated: see condPolarity.
 //
 // The "never empty under Bazel" invariant documented on condPolarity only
 // holds when err == nil: both findPrebuiltBDBinary and bazeltest.PrebuiltBD
@@ -334,13 +335,18 @@ func isPrebuiltVarIdent(e ast.Expr, prebuiltVars map[string]bool) bool {
 // to condPolarity's unmatched case and the exec they guard is reported
 // ungated (gastownhall/beads#7491 review, "M19"). A var is only trusted when
 // the error is bound to a named identifier AND that identifier is checked
-// (`if err != nil { <aborts> }`) somewhere in the same scope -- matching the
-// fix PR #7491 applied to cmd/bd/scripttest_test.go by hand.
-func prebuiltResultVars(scope ast.Node) map[string]bool {
+// (`if err != nil { <aborts> }`) after the lookup and before pos in the same
+// function scope. This is a lexical-order check, not full control-flow or
+// variable-binding analysis: unrelated enclosing conditions and intervening
+// reassignments or shadowing remain outside this policy's proof.
+func prebuiltResultVars(scope ast.Node, pos token.Pos) map[string]bool {
 	vars := map[string]bool{}
 	ast.Inspect(scope, func(n ast.Node) bool {
+		if _, ok := n.(*ast.FuncLit); ok && n != scope {
+			return false
+		}
 		assign, ok := n.(*ast.AssignStmt)
-		if !ok || len(assign.Rhs) != 1 || len(assign.Lhs) != 2 {
+		if !ok || len(assign.Rhs) != 1 || len(assign.Lhs) != 2 || assign.End() > pos {
 			return true
 		}
 		call, ok := assign.Rhs[0].(*ast.CallExpr)
@@ -368,7 +374,7 @@ func prebuiltResultVars(scope ast.Node) map[string]bool {
 			// func comment ("M19").
 			return true
 		}
-		if errorCheckedAndAborts(scope, errID.Name) {
+		if errorCheckedAndAborts(scope, errID.Name, assign.End(), pos) {
 			vars[id.Name] = true
 		}
 		return true
@@ -378,10 +384,13 @@ func prebuiltResultVars(scope ast.Node) map[string]bool {
 
 // errorCheckedAndAborts reports whether scope contains an `if errName !=
 // nil { <aborts> }` (in either operand order), where the if's body aborts
-// per blockAborts. It does not descend into a nested func literal, matching
-// newFuncScopes' gated closure's own scoping rule: an error check belongs to
-// the scope it is lexically in, not to an unrelated sibling closure.
-func errorCheckedAndAborts(scope ast.Node, errName string) bool {
+// per blockAborts, the condition starts after lookupEnd, and the if ends before
+// pos. Comparing the condition permits a lookup in the if's own initializer.
+// A later check cannot prevent an earlier exec (gastownhall/beads#7493). It
+// does not descend into a nested func literal, matching newFuncScopes' gated
+// closure's own scoping rule: an error check belongs to the scope it is
+// lexically in, not to an unrelated sibling closure.
+func errorCheckedAndAborts(scope ast.Node, errName string, lookupEnd, pos token.Pos) bool {
 	found := false
 	ast.Inspect(scope, func(n ast.Node) bool {
 		if _, ok := n.(*ast.FuncLit); ok && n != scope {
@@ -391,7 +400,8 @@ func errorCheckedAndAborts(scope ast.Node, errName string) bool {
 		if !ok {
 			return true
 		}
-		if isErrNotNilCheck(ifStmt.Cond, errName) && blockAborts(ifStmt.Body) {
+		if ifStmt.Cond.Pos() >= lookupEnd && ifStmt.End() <= pos &&
+			isErrNotNilCheck(ifStmt.Cond, errName) && blockAborts(ifStmt.Body) {
 			found = true
 		}
 		return true
@@ -1233,6 +1243,76 @@ func build() {
 		}
 	})
 
+	t.Run("PrebuiltBD lookup and error check must precede the exec (regression check, issue 7493)", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			src  string
+		}{
+			{
+				name: "error check after exec",
+				src: `
+	bd, err := bazeltest.PrebuiltBD()
+	if bd == "" {
+		exec.Command("go", "build")
+	}
+	if err != nil {
+		panic(err)
+	}
+`,
+			},
+			{
+				name: "error check before lookup",
+				src: `
+	var err error
+	if err != nil {
+		panic(err)
+	}
+	bd, err := bazeltest.PrebuiltBD()
+	if bd == "" {
+		exec.Command("go", "build")
+	}
+`,
+			},
+			{
+				name: "lookup and check after exec",
+				src: `
+	var bd string
+	if bd == "" {
+		exec.Command("go", "build")
+	}
+	bd, err := bazeltest.PrebuiltBD()
+	if err != nil {
+		panic(err)
+	}
+`,
+			},
+			{
+				name: "lookup in sibling closure",
+				src: `
+	var bd string
+	var err error
+	_ = func() {
+		bd, err = bazeltest.PrebuiltBD()
+	}
+	if err != nil {
+		panic(err)
+	}
+	if bd == "" {
+		exec.Command("go", "build")
+	}
+`,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				fset, f, lines := parse(t, "package p\nimport \"os/exec\"\nfunc build() {\n"+tc.src+"}\n")
+				hits := findHostToolExecCalls(fset, f, lines)
+				if len(hits) != 1 || hits[0].gated {
+					t.Fatalf("hits = %+v, want one ungated hit: lookup and aborting error check must precede the exec in its function scope", hits)
+				}
+			})
+		}
+	})
+
 	t.Run("a checked PrebuiltBD error keeps the gate working (regression check, review M19)", func(t *testing.T) {
 		// The fixed shape: the error is bound to a named variable and
 		// checked with an aborting `if err != nil`, matching the real fix
@@ -1257,6 +1337,73 @@ func build() {
 		if len(hits) != 1 || !hits[0].gated {
 			t.Fatalf("hits = %+v, want one gated hit: the error is checked and aborts, "+
 				"so the invariant holds", hits)
+		}
+	})
+
+	t.Run("PrebuiltBD error checks in if initializers (regression check, issue 7493)", func(t *testing.T) {
+		for _, tc := range []struct {
+			name      string
+			src       string
+			wantGated bool
+		}{
+			{
+				name: "findPrebuiltBDBinary initializer with returning prebuilt branch",
+				src: `
+	if bd, err := findPrebuiltBDBinary(); err != nil {
+		t.Fatal(err)
+	} else if bd != "" {
+		return bd
+	}
+	exec.Command("go", "build")
+`,
+				wantGated: true,
+			},
+			{
+				name: "PrebuiltBD assignment initializer with reversed error comparison",
+				src: `
+	var bd string
+	var err error
+	if bd, err = bazeltest.PrebuiltBD(); nil != err {
+		panic(err)
+	} else if bd != "" {
+		return bd
+	}
+	exec.Command("go", "build")
+`,
+				wantGated: true,
+			},
+			{
+				name: "exec in error branch before abort",
+				src: `
+	if bd, err := bazeltest.PrebuiltBD(); err != nil {
+		if bd == "" {
+			exec.Command("go", "build")
+		}
+		panic(err)
+	}
+`,
+			},
+			{
+				name: "nonaborting initializer error check",
+				src: `
+	var bd string
+	var err error
+	if bd, err = bazeltest.PrebuiltBD(); err != nil {
+		println(err)
+	}
+	if bd == "" {
+		exec.Command("go", "build")
+	}
+`,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				fset, f, lines := parse(t, "package p\nimport \"os/exec\"\nfunc build() string {\n"+tc.src+"return \"\"\n}\n")
+				hits := findHostToolExecCalls(fset, f, lines)
+				if len(hits) != 1 || hits[0].gated != tc.wantGated {
+					t.Fatalf("hits = %+v, want one hit with gated = %v", hits, tc.wantGated)
+				}
+			})
 		}
 	})
 
