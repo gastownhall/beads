@@ -30,3 +30,7 @@ func (r *eventsJournalSQLRepository) ReadPage(ctx context.Context, since int64, 
 func (r *eventsJournalSQLRepository) Prune(ctx context.Context, before int64, retainDays, retainRows int) (int64, error) {
 	return issueops.PruneEventsInTx(ctx, r.runner, before, retainDays, retainRows, time.Now().UTC())
 }
+
+func (r *eventsJournalSQLRepository) Head(ctx context.Context) (head, floor int64, err error) {
+	return issueops.ReadEventsHeadAndFloorInTx(ctx, r.runner)
+}
