@@ -252,7 +252,7 @@ jobs:
           GOARCH: arm64
           GOOS: darwin
         run: |
-          go build -tags "gms_pure_go netgo" \
+          go build -tags "gms_pure_go" \
             -ldflags "-s -w -X main.Version=${{ steps.version.outputs.version }} -X main.Build=$(git rev-parse --short HEAD) -X main.Commit=$(git rev-parse HEAD) -X main.Branch=$(git branch --show-current)" \
             -o bd-darwin-arm64 ./cmd/bd
           ./scripts/verify-cgo.sh bd-darwin-arm64
@@ -273,7 +273,7 @@ jobs:
           CC: clang -arch x86_64
           CXX: clang++ -arch x86_64
         run: |
-          go build -tags "gms_pure_go netgo" \
+          go build -tags "gms_pure_go" \
             -ldflags "-s -w -X main.Version=${{ steps.version.outputs.version }} -X main.Build=$(git rev-parse --short HEAD) -X main.Commit=$(git rev-parse HEAD) -X main.Branch=$(git branch --show-current)" \
             -o bd-darwin-amd64 ./cmd/bd
           ./scripts/verify-cgo.sh bd-darwin-amd64
