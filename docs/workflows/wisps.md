@@ -48,6 +48,17 @@ bd mol squash <wisp-id>
 bd mol burn <wisp-id>
 ```
 
+### Keeping a no-history bead
+
+`bd promote <wisp-id>` turns an ephemeral wisp into a permanent bead. It
+refuses a no-history bead that is not ephemeral (for example, one created with
+`--no-history`), even though that bead may be stored in the wisps table. To
+make such a bead durable, use the persistence move instead:
+
+```bash
+bd update <id> --persistent
+```
+
 ## Managing Wisps
 
 ```bash
