@@ -57,6 +57,13 @@ func readDoltProcessPIDs() ([]int, error) {
 
 // parseDoltProcessPIDs returns matching, non-defunct Dolt server PIDs from a
 // `ps -axo pid=,state=,command=` snapshot. It preserves the source row order.
+//
+// The match is a loose ordered substring check ("dolt", then "sql-server")
+// for production server management. The test-server sweep deliberately uses
+// the stricter isDoltServerArgv (sweep.go), since it signals processes it did
+// not start; every argv that one accepts is also accepted here
+// (TestSweepPredicateIsSubsetOfProductionMatch). Keep the two in that
+// relationship when changing either.
 func parseDoltProcessPIDs(snapshot []byte) []int {
 	var pids []int
 	for _, line := range strings.Split(string(snapshot), "\n") {
