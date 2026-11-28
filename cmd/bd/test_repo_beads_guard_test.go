@@ -115,6 +115,14 @@ func testMainInner(m *testing.M) int {
 	// A bd parent (say, a git hook or `bd` driving `go test`) must not make
 	// this binary's bd subprocesses skip the workspace gate's writer queue.
 	_ = os.Unsetenv(workspacegate.InheritedHoldEnv)
+	// `go test` run from inside Claude Code inherits its session variable, and
+	// the closing verbs read it (ambientSession): without this every in-process
+	// close here, and every bd subprocess handed os.Environ(), would record
+	// that session, and the tests that pin a sessionless close would fail. A
+	// test that wants a session sets one with t.Setenv.
+	for _, name := range sessionEnvVars {
+		_ = os.Unsetenv(name)
+	}
 	origWD, _ := os.Getwd()
 	// Computed once and reused below for the pin, the ceiling-var boundary,
 	// and the guard's own watch setup, so all three agree on exactly which

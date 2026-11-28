@@ -22,6 +22,27 @@ import (
 	"github.com/steveyegge/beads/issueops"
 )
 
+// sessionEnvVars are the environment variables `bd close` and
+// `bd update -s closed` read a session ID from when --session is not given,
+// in precedence order. CLAUDE_SESSION_ID is bd's own name for it and stays
+// first, so an environment that sets it on purpose keeps its value.
+// CLAUDE_CODE_SESSION_ID is the name Claude Code itself exports to the
+// commands it runs (beads#5450); without it closed_by_session stays empty
+// under Claude Code unless a hook copies one variable to the other.
+var sessionEnvVars = []string{"CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID"}
+
+// ambientSession returns the session ID the environment carries and the name
+// of the variable it came from. Both are empty when no variable is set; a
+// variable set to the empty string counts as unset.
+func ambientSession() (session, envVar string) {
+	for _, name := range sessionEnvVars {
+		if value := os.Getenv(name); value != "" {
+			return value, name
+		}
+	}
+	return "", ""
+}
+
 var closeCmd = &cobra.Command{
 	Use:     "close [id...]",
 	Aliases: []string{"done"},
@@ -102,7 +123,7 @@ in the molecule for you; add --no-auto to only show it.`,
 
 		session, _ := cmd.Flags().GetString("session")
 		if session == "" {
-			session = os.Getenv("CLAUDE_SESSION_ID")
+			session, _ = ambientSession()
 		}
 
 		ctx := rootCtx
@@ -543,7 +564,7 @@ func init() {
 	closeCmd.Flags().Bool("no-auto", false, "With --continue, show next step but don't claim it")
 	closeCmd.Flags().Bool("suggest-next", false, "Show newly unblocked issues after closing")
 	closeCmd.Flags().Bool("claim-next", false, "Automatically claim the next highest priority available issue")
-	closeCmd.Flags().String("session", "", "Claude Code session ID (or set CLAUDE_SESSION_ID env var)")
+	closeCmd.Flags().String("session", "", "Claude Code session ID (or set CLAUDE_SESSION_ID or CLAUDE_CODE_SESSION_ID env var)")
 	// A8 (beads#4682): bypasses the N-id batch above for a single guarded close.
 	closeCmd.Flags().String("if-revision", "", ifRevisionFlagHelp)
 	closeCmd.ValidArgsFunction = issueIDCompletion

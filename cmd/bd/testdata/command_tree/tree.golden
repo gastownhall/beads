@@ -661,7 +661,7 @@ bd close
   flag --reason -r type=string default="" usage="Reason for closing"
   flag --reason-file type=string default="" usage="Read close reason from file (use - for stdin)"
   flag --resolution type=string default="" hidden usage="Alias for --reason (Jira CLI convention)"
-  flag --session type=string default="" usage="Claude Code session ID (or set CLAUDE_SESSION_ID env var)"
+  flag --session type=string default="" usage="Claude Code session ID (or set CLAUDE_SESSION_ID or CLAUDE_CODE_SESSION_ID env var)"
   flag --suggest-next type=bool default="false" usage="Show newly unblocked issues after closing"
 
 bd codex-hook
@@ -7417,7 +7417,7 @@ bd update
   flag --persistent type=bool default="false" usage="Mark issue as persistent (promote wisp to regular issue)"
   flag --priority -p type=string default="" usage="Priority (0-4 or P0-P4, 0=highest)"
   flag --remove-label type=stringSlice default="[]" usage="Remove labels (repeatable)"
-  flag --session type=string default="" usage="Claude Code session ID for status=closed (or set CLAUDE_SESSION_ID env var)"
+  flag --session type=string default="" usage="Claude Code session ID for status=closed (or set CLAUDE_SESSION_ID or CLAUDE_CODE_SESSION_ID env var)"
   flag --set-labels type=stringSlice default="[]" usage="Set labels, replacing all existing (repeatable)"
   flag --set-metadata type=stringArray default="[]" usage="Set metadata key=value (repeatable, e.g., --set-metadata team=platform)"
   flag --spec-id type=string default="" usage="Link to specification document"

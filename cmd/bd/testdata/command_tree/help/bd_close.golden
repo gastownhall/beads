@@ -36,7 +36,7 @@ Flags:
       --no-auto                      With --continue, show next step but don't claim it
   -r, --reason string                Reason for closing
       --reason-file string           Read close reason from file (use - for stdin)
-      --session string               Claude Code session ID (or set CLAUDE_SESSION_ID env var)
+      --session string               Claude Code session ID (or set CLAUDE_SESSION_ID or CLAUDE_CODE_SESSION_ID env var)
       --suggest-next                 Show newly unblocked issues after closing
 
 Global Flags:
