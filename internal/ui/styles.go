@@ -103,14 +103,19 @@ func DisableColors() {
 // IsAgentMode returns true if the CLI is running in agent-optimized mode.
 // This is triggered by:
 //   - BD_AGENT_MODE=1 environment variable (explicit)
-//   - CLAUDE_CODE environment variable (auto-detect Claude Code)
+//   - CLAUDECODE environment variable (set by Claude Code itself)
+//   - CLAUDE_CODE environment variable (legacy/alternate auto-detect)
 //
 // Agent mode provides ultra-compact output optimized for LLM context windows.
 func IsAgentMode() bool {
 	if os.Getenv("BD_AGENT_MODE") == "1" {
 		return true
 	}
-	// Auto-detect Claude Code environment
+	// Auto-detect Claude Code environment (Claude Code sets CLAUDECODE, no underscore)
+	if os.Getenv("CLAUDECODE") != "" {
+		return true
+	}
+	// Legacy/alternate auto-detect
 	if os.Getenv("CLAUDE_CODE") != "" {
 		return true
 	}
