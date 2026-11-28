@@ -170,7 +170,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remote URL. See
   [Sync failures](docs/recovery/sync-failures.md#credentials-in-a-remote-url-and-merge-commits).
 
+- **The Dolt server bd launches no longer lets SQL read and write any file.**
+  bd left Dolt's `secure_file_priv` at its default, the empty string, so
+  `LOAD_FILE`, `LOAD DATA INFILE` and `SELECT ... INTO OUTFILE` reached every
+  path the server process could. That server runs as you, and its
+  passwordless `root` holds the FILE privilege, so any local process able to
+  open the loopback port could read and write your files through SQL, even
+  one sandboxed away from the file system. The config bd generates now sets
+  `secure_file_priv` to `dolt-server-files` beside it
+  (`.beads/dolt-server-files`, or `~/.beads/shared-server/dolt-server-files`
+  for the shared server). bd does not create that directory, and while it
+  does not exist the server refuses those statements; bd itself never uses
+  them. To use them, create the directory and keep the files in it. A running
+  server keeps the old setting until it restarts (`bd dolt stop`, then
+  `bd dolt start`). Servers you configure and run yourself, and the proxied
+  server's config, which bd writes once and you may edit, are unchanged. See
+  [Server config file](docs/architecture/dolt.md).
+
 ### Added
+
+- **`hooks.manage` and `gitignore.manage`: per-repository opt-outs from bd's
+  hook and .gitignore management.** A repository that runs its own hook manager
+  or keeps its own `.beads/.gitignore` had no durable way to stop bd writing
+  them: `no-hooks` only turns off the issue-lifecycle hook runner,
+  `bd init --skip-hooks` lasts one invocation, and `doctor.suppress.*` only
+  hides a `bd doctor` warning. Set either key to `false` in the tracked
+  `.beads/config.yaml` (`bd config set hooks.manage false`). With
+  `hooks.manage: false`, `bd hooks install` and `bd migrate hooks --apply`
+  refuse with a message naming where the key is set and exit non-zero, while
+  `bd init`, `bd config apply` and `bd doctor --fix` skip the hooks;
+  `bd config drift`, `bd doctor` (`--check-health` too) and `bd info` stop
+  reporting them. With `gitignore.manage: false`, `bd init`, `bd bootstrap`,
+  `bd connect` and `bd doctor --fix` leave `.beads/.gitignore` and the project
+  `.gitignore` untouched; `bd init` then commits only its own files under
+  `.beads`, never the database, and `bd doctor` still warns, with no fix,
+  while `.beads/.gitignore` lacks a pattern bd requires. A user-level `false`
+  applies to every repository. Both keys default to `true` (bd-cxm9r).
 
 - **`bd list --include-all-types`: one flag for every hidden kind of row.**
   `ListRequest.IncludeAllTypes` — the union that lifts every default type or
@@ -594,6 +629,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   description and metadata are unchanged, and omitting the flag (or passing
   `0`) is byte-identical to today's output. JSON output is untouched;
   `--include-comments` still streams every comment there.
+- **`bd show --head`** prints a short view of a long issue
+  ([#7187](https://github.com/gastownhall/beads/issues/7187)): the last 1 KB
+  of the notes in place of the description, design, notes and acceptance
+  criteria, and the last 3 comments (`--comments-tail N` changes the count).
+  The notes are cut from the end, on a line start where one is near and
+  never inside a character, because notes are appended to and the newest
+  state is last. One line after the comments names what was withheld and its
+  size, or says that nothing was. The header, labels, metadata and both
+  dependency lists print as before, and a comment is never cut, so the view
+  is short but has no fixed size. `--head` is refused with `--short`,
+  `--long`, `--refs`, `--children`, `--thread`, `--as-of`, `--watch` and
+  `--include-comments`. Nothing is stored or moved, and `bd show` without
+  the flag prints what it printed before.
+- **`bd show --head --json`** returns the same short view as JSON
+  ([#7187](https://github.com/gastownhall/beads/issues/7187)): one object
+  per issue with the keys of `bd show --json`, where `description`, `design`
+  and `acceptance_criteria` are absent, `notes` is the last 1 KB of the
+  field, and `comments` holds the last 3 comment bodies (`--comments-tail N`
+  changes the count, and `0` keeps them all; `--include-comments` is refused
+  with `--head`, because it asks for every body). Each dependency row is
+  reduced as by `--brief-deps`, because a full row carries that issue's own
+  description and notes. A `withheld` object counts what was left out
+  (`description_bytes`, `design_bytes`, `notes_bytes`,
+  `acceptance_criteria_bytes`, `comments`). It is always present, and all
+  zero for an issue the view shows whole, so a reader can tell the short
+  view from a full record. `comment_count` is still the count of all
+  comments. The view is cut from the answer that
+  `bd show --json --include-comments --brief-deps` reads, so the read
+  contract and the HTTP API are unchanged: the output is short, and the read
+  still fetches every comment. `bd show --json` without `--head` returns
+  what it returned before.
 - `GET /v0/beads/issues` accepts `no_assignee`, `title` and a repeatable `id`
   (one id per value, at most 200), each behind its own new capability token
   (`issues.list.noAssignee`, `issues.list.title`, `issues.list.ids`; additive,
@@ -818,6 +884,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--claim-next`).
 
 ### Changed
+
+- **`bd prune` no longer deletes a closed bead that a live bead still depends
+  on.** A prune deleted the closed parent of an open child, because the
+  reference protection scans text and a child names its parent by a
+  `parent-child` edge and a dotted id, not by citing it. The child stayed open
+  with no parent, and the epic's history was gone. `bd prune` now asks for the
+  protection `bd purge` already has
+  (`issueops.SweepRequest.ProtectLiveDependents`): a closed bead is kept while
+  a bead in any status that is not done depends on it through a
+  `parent-child`, `tracks` or `blocks` edge, so a closed blocker of an open
+  bead is kept too, until that bead closes. The held-back count is reported
+  as `live_dependent_skipped` in `--json` when it is not zero, and on its own
+  line in text output. The edges are read before the text scan, so a closed
+  bead that a live bead both depends on and cites is now counted there and no
+  longer in `referenced_skipped` or `referenced_ids_sample`. No flag turns the
+  protection off: `--ignore-references` covers citations in text only, so it
+  no longer deletes a cited bead that a live bead also depends on; `bd delete`
+  removes such a bead on purpose. On a `bd connect` workspace the server must
+  advertise `issues.sweep.liveDependents`, as `bd purge` already requires. No
+  `bd serve` up to 1.3.4 does, so against one `bd prune` is refused before
+  the request is sent, where it used to run without the protection.
 
 - **On macOS, bd no longer reads `~/Library/Application
   Support/bd/config.yaml` or `~/Library/Application Support/beads/PRIME.md`.**
@@ -1475,6 +1562,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd close` and `bd update -s closed` record the session under Claude
+  Code.** Both verbs fill `closed_by_session` from `--session` or, without
+  it, from the `CLAUDE_SESSION_ID` environment variable. Claude Code exports
+  `CLAUDE_CODE_SESSION_ID` to the commands it runs and does not export
+  `CLAUDE_SESSION_ID`, so the column stayed empty on every close an agent
+  made unless a hook copied one variable to the other. bd now reads
+  `CLAUDE_CODE_SESSION_ID` when `CLAUDE_SESSION_ID` is unset or empty, so
+  every close made from a Claude Code session now records that session's ID:
+  it appears as `closed_by_session` in `--json` output and exports and as the
+  "Closed by session" line of `bd show --long`. `--session` and
+  `CLAUDE_SESSION_ID` keep their precedence, so a setup that sets either one
+  sees no change. On an http workspace, where `bd update -s
+  closed` cannot carry the session, the one-line notice on stderr now also
+  appears under Claude Code, and it names the variable the session came
+  from. (#5450)
+
 - **`bd show` no longer prints `Lease: expires expired` for a lapsed lease.**
   An in_progress issue keeps its lease row after the lease runs out, until
   `bd reclaim` sweeps it, and the lease line then printed the verb twice and
@@ -1529,6 +1632,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no-workspace payload with a `suggestion` that names the `.beads` directory
   meant.
 
+- **`bd gc` and `bd doctor --fix` no longer skip a delete that collides with
+  a concurrent write.** On a Dolt sql-server, deleting an issue while another
+  client commits a write to that same issue loses Dolt's commit-time merge:
+  the server rolls the delete back with a serialization failure (Error 1213).
+  The store's `DeleteIssue` and `DeleteIssues` were the last issue writes
+  that ran as a single attempt, so the error reached the caller. `bd gc`'s
+  decay phase and the `bd doctor --fix` stale-closed and patrol-pollution
+  cleanups print it as a warning, leave the issue in place and exit 0. Both
+  entry points now replay the rolled-back delete, as create, update, close,
+  claim and sweep already do.
+
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
   from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so
@@ -1564,6 +1678,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command, instead of `bd migrate --force`, `bd dolt push` and `bd
   bootstrap`. What is refused, and the consent it takes, are unchanged;
   server and embedded mode print, and emit as JSON, what they did before.
+
+- **A close, a batch close, a dependency removal or an update to a non-active
+  status that races another unblocking write keeps its own Dolt commit**
+  ([#7035](https://github.com/gastownhall/beads/issues/7035)).
+  On a server-mode store the post-commit blocked-state recheck published
+  before the operation's own Dolt commit. The recheck stages the whole
+  `issues` table, so the operation's row went into the commit named
+  `bd: recheck blocked after ...` and the operation's commit, whose message
+  carries its provenance, had nothing left to stage and never reached
+  `dolt log`. The operation's commit is now minted first and the recheck's
+  follows it, the order the dependency-removal and wisp paths already keep.
+  No row was lost before; only the history line was.
 
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
@@ -1790,6 +1916,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `dolt.auto-commit` `batch` or `off` the write waits for `bd dolt commit`,
   as other writes do. (builds on PR #7717 by harry-miller-trimble)
 
+- **Overlapping whole-set label edits on one issue now serialize instead of
+  merging, and `bd set-state` leaves one value per dimension** (#5657). Two
+  label edits on the same issue that overlapped both committed: two `bd update
+  --set-labels` calls ended with the union of both sets, and two `bd
+  set-state` calls on one dimension could leave both values, which a later `bd
+  set-state` never removed. An edit that decides which labels to drop from the
+  set it read (`--set-labels`, `bd set-state`, and a `labels` replacement over
+  the HTTP API or the Go SDK) now also rewrites a clone-local coordination
+  record for that issue, so the second of two such edits conflicts at commit
+  and is replayed against the labels the first one committed. `bd set-state`
+  now removes every label of the dimension (each label starting with
+  `<dimension>:`) in the same update that adds the new value, so it also
+  repairs a dimension that already holds two values. Adds and removes of named
+  labels (`--add-label`, `--remove-label`, `bd label add`, `remove` and
+  `propagate`, `bd cook --persist`) never touch the record, so they cannot
+  fail on it. They stay literal: two writers that each move `state:a` to a
+  different value with `--remove-label`/`--add-label` can still leave both,
+  the same result as running them one after the other; use `bd set-state` for
+  a dimension that must hold one value. The HTTP API carries the dimension
+  removal as `remove_label_prefixes` on `PATCH /v0/beads/issues/{id}` and
+  `labels.remove_prefixes` on an `issues:batchApply` update item, behind the
+  new `issues.update.labelPrefixes` capability, and the Go SDK's
+  `issueops.LabelPatch` gains `RemovePrefixes`. Against a `bd serve` without
+  the capability, bd refuses a prefix removal before sending it, and `bd
+  set-state` removes the exact labels it read, as before. `bd label rename`,
+  the create/import label upsert and `bd promote` do not take part in the
+  coordination yet, and a bd older than this release never writes the record,
+  so its label edits can still merge with a newer bd's during an upgrade.
 - **Upgrading a clone whose local `wisps` table lacks `started_at` or
   `no_history` no longer stops at schema v52** (#6080, reported by @dmcp718;
   fix from #8099 by @kyoto-bonsai). Migrations 0023 and 0027 add those
@@ -2151,6 +2305,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backport, #8083). Such a failure now stops the command with an error that
   names the repository and says what to do, as does a failure to list the
   local beads.
+- GitHub sync leaves an issue transferred out of the configured repository
+  alone. GitHub follows the transfer, so fetching the bead's issue returned it
+  under the other repository's URL: conflict detection compared the bead with
+  it, a push could write the bead over it, and a pull by bead ID imported it
+  as a new bead or wrote it over a bead linked to its new URL. Pull, push and
+  the conflict check now skip it, with a warning naming the configured
+  repository; push and the conflict check do so once sync has read the
+  repository's current name from GitHub. A push also says when it skips a
+  bead linked outside the configured repository, in one line for a bulk push
+  and once per bead for a push by ID, and a pull says when an issue came back
+  under a URL outside it. A ref still names the configured repository when
+  it spells the host with a `www.` prefix, without `https://`, with an
+  explicit default port or with a trailing dot, and the host of the
+  repository's own URL counts as its host too, so an API proxy in front of
+  `github.com` keeps syncing (#7948).
+- `bd github push` and `bd github sync` on a GitHub Enterprise host whose
+  name does not contain `github.com` no longer take a bead linked to an
+  issue on that host for an unlinked one: a push updates the linked issue
+  instead of creating a second issue and relinking the bead to it. An issue
+  URL now counts as GitHub's when it contains `github.com`, in any letter
+  case, or sits on the host of `github.url` (#7948).
 - `bd compact` no longer discards writes that reach `main` while it runs. It
   finished by hard-resetting `main` onto the rebuilt history, which dropped
   changes in `main`'s working set that no Dolt commit held yet (a batch under
@@ -5544,8 +5719,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     "Live" is any status that is not done, including custom statuses. The
     held-back count is reported as `live_dependent_skipped` in `--json` (and
     on its own line in text output). The protection is on the role
-    (`issueops.SweepRequest.ProtectLiveDependents`); `bd prune` does not ask
-    for it.
+    (`issueops.SweepRequest.ProtectLiveDependents`); `bd prune` asks for it
+    too (see Changed).
   - **`--wisps-plane`** selects every closed row stored in the wisps table,
     including `--no-history` beads, which the default ephemeral selection
     leaves to `bd prune`. It works on embedded, server and proxied

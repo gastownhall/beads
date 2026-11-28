@@ -714,6 +714,21 @@ func TestProxiedServerClose2(t *testing.T) {
 		}
 	})
 
+	// Claude Code exports CLAUDE_CODE_SESSION_ID, not CLAUDE_SESSION_ID
+	// (beads#5450); the close reads it when bd's own variable is absent.
+	t.Run("close_session_from_claude_code_env", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "csc")
+		issue := bdProxiedCreate(t, bd, p.dir, "Session harness env")
+		if _, stderr, err := bdProxiedRunEnv(t, bd, p.dir, []string{"CLAUDE_CODE_SESSION_ID=sess-harness"}, "close", issue.ID); err != nil {
+			t.Fatalf("close failed: %v\n%s", err, stderr)
+		}
+		db := openProxiedDB(t, p)
+		if got := readClosedBySession(t, db, issue.ID); got != "sess-harness" {
+			t.Errorf("closed_by_session: got %q, want %q (from CLAUDE_CODE_SESSION_ID)", got, "sess-harness")
+		}
+	})
+
 	t.Run("close_json_output", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "cjo")

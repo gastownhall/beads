@@ -61,7 +61,7 @@ func (s *DoltStore) runIssueOperationTx(ctx context.Context, commitMsg string, f
 func (s *DoltStore) runIssueOperationTxWithMessage(ctx context.Context, fn func(*sql.Tx) (storageissueops.ChangedTables, string, error)) error {
 	var tables storageissueops.ChangedTables
 	var commitMsg string
-	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	pending, err := s.retryWriteTxOn(ctx, s.db, func(tx *sql.Tx) error {
 		// Plain assignment (not append-into-captured-state): a retried
 		// transaction re-runs the body and overwrites both values, so a
 		// rolled-back attempt cannot leak tables into the commit.
@@ -82,6 +82,14 @@ func (s *DoltStore) runIssueOperationTxWithMessage(ctx context.Context, fn func(
 		// resolves the true outcome.
 		return err
 	}
+	// The operation is durable. Its dependents are settled on every return
+	// below, and after the operation's own Dolt commit, so that the recheck's
+	// commit follows it. The recheck stages the whole issues table: run first,
+	// it would publish this operation's rows under the recheck's message and
+	// leave nothing for the commit that carries this operation's message
+	// (gastownhall/beads#7035). This is the order RemoveDependencyWithOptions
+	// and commitWispTxAndRecheck already keep.
+	defer s.settleBlockedRecheck(ctx, pending)
 	staged := sortedDirtyTables(tables)
 	if len(staged) == 0 {
 		return nil

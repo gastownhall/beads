@@ -831,6 +831,21 @@ The `set-state` command atomically:
 
 See [bd set-state](/cli-reference/set-state) for full command reference.
 
+### Raw Label Edits Are Literal
+
+`bd label add`, `bd label remove`, and `bd update --add-label`/`--remove-label` add or remove exactly the labels they name. They know nothing about dimensions. Two writers that each move `state:a` to a different value can therefore leave both values, and that is also what running them one after the other produces:
+
+```bash
+# bd-42 starts with state:a
+bd update bd-42 --remove-label state:a --add-label state:b &
+bd update bd-42 --remove-label state:a --add-label state:c &
+wait
+bd label list bd-42
+# state:b, state:c
+```
+
+When a dimension must hold one value, change it with `bd set-state`, which removes the dimension's existing value instead of leaving it to the caller, or replace the whole set with `bd update --set-labels`.
+
 ## Troubleshooting
 
 ### Labels Not Showing in List

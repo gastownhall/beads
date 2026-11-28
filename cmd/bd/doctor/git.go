@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/remedy"
@@ -40,6 +41,27 @@ const bdSectionMarkerPrefix = "# --- BEGIN BEADS INTEGRATION"
 
 // bdHooksRunPattern matches hooks that call bd hooks run
 var bdHooksRunPattern = regexp.MustCompile(`\bbd\s+hooks\s+run\b`)
+
+// notManagedCheck is the OK result a check reports, in place of a warning, for
+// a repository that sets key (hooks.manage or gitignore.manage) to false: the
+// warning would only ask for a write bd refuses there, so neither the warning
+// nor its --fix appears, and no doctor.suppress.* key is needed.
+func notManagedCheck(name, key string) DoctorCheck {
+	return DoctorCheck{
+		Name:    name,
+		Status:  StatusOK,
+		Message: fmt.Sprintf("Not managed by bd (%s=false)", key),
+	}
+}
+
+// CheckGitHooksForRepo is CheckGitHooks for the workspace at repoPath. A
+// repository that sets hooks.manage: false gets an OK "not managed" result.
+func CheckGitHooksForRepo(repoPath, cliVersion string) DoctorCheck {
+	if !config.HooksManaged(ResolveBeadsDirForRepo(repoPath)) {
+		return notManagedCheck("Git Hooks", config.HooksManageKey)
+	}
+	return CheckGitHooks(cliVersion)
+}
 
 // CheckGitHooks verifies that recommended git hooks are installed.
 func CheckGitHooks(cliVersion string) DoctorCheck {
@@ -807,6 +829,11 @@ func resolveExistingPrefix(path string) string {
 func CheckGitHooksDoltCompatibility(path string) DoctorCheck {
 	backend, beadsDir := getBackendAndBeadsDir(path)
 
+	// Its fix reinstalls hooks, which bd refuses under hooks.manage: false.
+	if !config.HooksManaged(beadsDir) {
+		return notManagedCheck("Git Hooks Dolt Compatibility", config.HooksManageKey)
+	}
+
 	// Only relevant for Dolt backend
 	if backend != configfile.BackendDolt {
 		return DoctorCheck{
@@ -877,7 +904,6 @@ func CheckGitHooksDoltCompatibility(path string) DoctorCheck {
 	}
 
 	// Hook exists but lacks Dolt check - this will cause errors
-	_ = beadsDir // silence unused warning
 	return DoctorCheck{
 		Name:    "Git Hooks Dolt Compatibility",
 		Status:  StatusError,

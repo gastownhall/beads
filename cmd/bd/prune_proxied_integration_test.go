@@ -132,6 +132,45 @@ func TestProxiedServerPrune(t *testing.T) {
 		}
 	})
 
+	t.Run("keeps_closed_parent_of_open_child", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "pld")
+		parent := bdProxiedCreate(t, bd, p.dir, "Closed epic", "--type", "epic")
+		child := bdProxiedCreate(t, bd, p.dir, "Open child", "--parent", parent.ID)
+		bdProxiedClose(t, bd, p.dir, parent.ID, "--force")
+		lone := bdProxiedCreate(t, bd, p.dir, "Closed bead nothing depends on")
+		bdProxiedClose(t, bd, p.dir, lone.ID)
+
+		// --ignore-references covers citations in text only: the stored edge
+		// still protects.
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir,
+			"prune", "--json", "--pattern", "*", "--force", "--ignore-references")
+		if err != nil {
+			t.Fatalf("bd prune --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		start := strings.Index(stdout, "{")
+		if start < 0 {
+			t.Fatalf("no JSON object in prune output:\n%s", stdout)
+		}
+		var stats map[string]any
+		if err := json.Unmarshal([]byte(stdout[start:]), &stats); err != nil {
+			t.Fatalf("parse prune JSON: %v\nraw: %s", err, stdout[start:])
+		}
+		if got, ok := stats["pruned_count"].(float64); !ok || int(got) != 1 {
+			t.Errorf("pruned_count: got %v, want 1", stats["pruned_count"])
+		}
+		if got, ok := stats["live_dependent_skipped"].(float64); !ok || int(got) != 1 {
+			t.Errorf("live_dependent_skipped: got %v, want 1", stats["live_dependent_skipped"])
+		}
+		db := openProxiedDB(t, p)
+		if !issueRowExists(t, db, parent.ID) {
+			t.Errorf("closed parent %s of open child %s must be protected from prune", parent.ID, child.ID)
+		}
+		if issueRowExists(t, db, lone.ID) {
+			t.Errorf("closed bead %s nothing depends on should be pruned", lone.ID)
+		}
+	})
+
 	t.Run("json_output", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "pjo")

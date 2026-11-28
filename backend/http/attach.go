@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/gitignore"
 	"github.com/steveyegge/beads/internal/httpclient"
@@ -36,7 +37,8 @@ import (
 // as SaveTarget's own precondition. It DOES ensure both of this backend's
 // per-user filenames are covered by beadsDir's .gitignore
 // (gitignore.EnsurePatternIgnored): the sidecar, and
-// httpclient.LocalMetadataFileName, which the store writes on first use. That
+// httpclient.LocalMetadataFileName, which the store writes on first use, unless
+// the workspace sets gitignore.manage: false and so owns that file. That
 // is the same guarantee `bd connect` makes via doctor.EnsureGitignoreForBeadsDir
 // — but through a small, independent implementation here rather than
 // importing cmd/bd/doctor, whose package as a whole pulls in dolt and
@@ -93,9 +95,13 @@ func Attach(beadsDir string, target Target) error {
 	// Both of this backend's per-user files: the sidecar just written, and
 	// the local metadata file the store itself writes on first use, which
 	// never passes through here and so must be covered in advance.
-	for _, name := range []string{httpclient.TargetFileName, httpclient.LocalMetadataFileName} {
-		if err := gitignore.EnsurePatternIgnored(beadsDir, name); err != nil {
-			return fmt.Errorf("ensuring %s is gitignored: %w", name, err)
+	// A workspace that sets gitignore.manage: false owns its .gitignore, and
+	// covering these files is then its job.
+	if config.GitignoreManaged(beadsDir) {
+		for _, name := range []string{httpclient.TargetFileName, httpclient.LocalMetadataFileName} {
+			if err := gitignore.EnsurePatternIgnored(beadsDir, name); err != nil {
+				return fmt.Errorf("ensuring %s is gitignored: %w", name, err)
+			}
 		}
 	}
 	// Only the backend SELECTION changes here. cfg.Database/cfg.ProjectID (if

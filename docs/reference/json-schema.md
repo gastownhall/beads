@@ -257,6 +257,34 @@ items, plus:
   `bd ready` also withholds because a blocked parent blocks its children,
   carries no `gated_by`
 
+### bd show --head --json
+
+Returns the same top-level array, one element per requested ID, with each
+element cut down to a short view of a long issue. An element has the fields
+of `bd show --json`, with these differences:
+- `description`, `design` and `acceptance_criteria` are absent
+- `notes` (string): the last 1 KB of the field, cut on a line start where one
+  is near and never inside a character; absent when the field is empty
+- `comments` (object[]): the last 3 comments, returned without
+  `--include-comments` (which `--head` refuses); absent when the issue has
+  none. `--comments-tail N` changes the count and `0` keeps them all.
+  `comment_count` is still the count of all comments, and `comments_omitted`
+  is not set
+- `dependencies` (object[]): each record reduced to its identity fields, as
+  with `--brief-deps`
+- `withheld` (object): what the view left out. Always present, with every
+  member present, so its presence tells the short view from a full record,
+  and all five are `0` for an issue the view shows whole:
+  - `description_bytes`, `design_bytes`, `acceptance_criteria_bytes`
+    (number): the size of each absent field
+  - `notes_bytes` (number): the size of the earlier notes that were cut off
+  - `comments` (number): how many older comments were left out
+
+The view is cut from the answer that
+`bd show --json --include-comments --brief-deps` reads, so it adds no
+parameter to the read contract or the HTTP API. The output is short; the read
+still fetches every comment.
+
 ### bd close --json
 
 Returns a top-level JSON array with one entry per closed issue, in the order

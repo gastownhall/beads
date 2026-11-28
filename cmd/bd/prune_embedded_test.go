@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -153,6 +154,82 @@ func TestEmbeddedPruneSafetyAndScope(t *testing.T) {
 		if !strings.Contains(strings.ToLower(out), "no closed beads to prune") {
 			t.Errorf("expected prune to skip closed ephemeral %s; got: %s", wispID, out)
 		}
+	})
+
+	// ===== Scope: must NOT delete what a live bead still depends on =====
+
+	t.Run("prune_keeps_closed_bead_a_live_bead_depends_on", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "pl")
+
+		// A closed epic whose child is still open. The child names its parent
+		// by a parent-child edge and its dotted id, never in its text, so the
+		// reference scan cannot see the link.
+		parent := bdCreate(t, bd, dir, "Closed epic", "--type", "epic")
+		child := bdCreate(t, bd, dir, "Open child", "--parent", parent.ID)
+		bdClose(t, bd, dir, parent.ID, "--force")
+
+		// A closed blocker of a bead that is still open.
+		blocker := bdCreate(t, bd, dir, "Closed blocker")
+		waiter := bdCreate(t, bd, dir, "Open bead that waited on it")
+		bdDepAdd(t, bd, dir, waiter.ID, blocker.ID)
+		bdClose(t, bd, dir, blocker.ID)
+
+		// Controls: a closed parent whose child is closed too, and a closed
+		// bead nothing depends on. All three go, which proves the sweep ran
+		// and that an edge from a closed bead protects nothing.
+		doneParent := bdCreate(t, bd, dir, "Closed epic, closed child", "--type", "epic")
+		doneChild := bdCreate(t, bd, dir, "Closed child", "--parent", doneParent.ID)
+		bdClose(t, bd, dir, doneChild.ID)
+		bdClose(t, bd, dir, doneParent.ID)
+		lone := createAndClose(t, bd, dir, "Closed bead nothing depends on")
+
+		pruneJSON := func(args ...string) map[string]any {
+			t.Helper()
+			out := bdPrune(t, bd, dir, append([]string{"--json", "--pattern", "pl-*"}, args...)...)
+			start := strings.Index(out, "{")
+			if start < 0 {
+				t.Fatalf("no JSON object in prune output:\n%s", out)
+			}
+			var stats map[string]any
+			if err := json.Unmarshal([]byte(out[start:]), &stats); err != nil {
+				t.Fatalf("parse prune JSON: %v\nraw: %s", err, out[start:])
+			}
+			return stats
+		}
+		count := func(stats map[string]any, key string) int {
+			n, _ := stats[key].(float64)
+			return int(n)
+		}
+
+		// --ignore-references covers citations in text only: the stored edges
+		// still protect.
+		preview := pruneJSON("--dry-run", "--ignore-references")
+		if count(preview, "prune_count") != 3 || count(preview, "live_dependent_skipped") != 2 {
+			t.Fatalf("dry run = %v; want prune_count 3 and live_dependent_skipped 2", preview)
+		}
+
+		result := pruneJSON("--force")
+		if count(result, "pruned_count") != 3 || count(result, "live_dependent_skipped") != 2 {
+			t.Fatalf("prune = %v; want pruned_count 3 and live_dependent_skipped 2", result)
+		}
+		for _, id := range []string{parent.ID, child.ID, blocker.ID, waiter.ID} {
+			if got := bdShow(t, bd, dir, id); got.ID != id {
+				t.Errorf("expected %s to survive prune, got %q", id, got.ID)
+			}
+		}
+		for _, id := range []string{doneParent.ID, doneChild.ID, lone} {
+			bdShowFail(t, bd, dir, id)
+		}
+
+		// Once the child closes, nothing live depends on the epic and the next
+		// prune takes both.
+		bdClose(t, bd, dir, child.ID)
+		after := pruneJSON("--force")
+		if count(after, "pruned_count") != 2 || count(after, "live_dependent_skipped") != 1 {
+			t.Fatalf("prune after the child closed = %v; want pruned_count 2 and live_dependent_skipped 1 (the blocker)", after)
+		}
+		bdShowFail(t, bd, dir, parent.ID)
+		bdShowFail(t, bd, dir, child.ID)
 	})
 }
 

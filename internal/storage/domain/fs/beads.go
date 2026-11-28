@@ -85,7 +85,13 @@ func (r *beadsDirFSRepositoryImpl) BeadsDirExists(ctx context.Context) (bool, er
 	return info.IsDir(), nil
 }
 
+// WriteBeadsGitignore writes the template .beads/.gitignore, or appends the
+// patterns an existing one lacks. A workspace that sets gitignore.manage: false
+// owns the file, and this writes nothing there.
 func (r *beadsDirFSRepositoryImpl) WriteBeadsGitignore(ctx context.Context) error {
+	if !config.GitignoreManaged(r.beadsDir) {
+		return nil
+	}
 	if r.templates.BeadsGitignore == "" {
 		return fmt.Errorf("fs: WriteBeadsGitignore: template not configured")
 	}
@@ -141,7 +147,12 @@ func (r *beadsDirFSRepositoryImpl) BeadsGitignoreExists(ctx context.Context) (bo
 	return fileExists(filepath.Join(r.beadsDir, ".gitignore"), "fs: BeadsGitignoreExists")
 }
 
+// WriteProjectGitignore appends bd's patterns to the project .gitignore. Like
+// WriteBeadsGitignore, it writes nothing under gitignore.manage: false.
 func (r *beadsDirFSRepositoryImpl) WriteProjectGitignore(ctx context.Context) error {
+	if !config.GitignoreManaged(r.beadsDir) {
+		return nil
+	}
 	if r.workDir == "" {
 		return fmt.Errorf("fs: WriteProjectGitignore: workDir not set")
 	}

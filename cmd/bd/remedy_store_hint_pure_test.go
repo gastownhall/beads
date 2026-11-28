@@ -87,6 +87,13 @@ func TestStoreReadCommandHintsQuoteIDs(t *testing.T) {
 			})
 			return out, bdLine(t, out, "older")
 		}},
+		{"bd show head trailer", "bd show", func(t *testing.T, id string) (string, string) {
+			out := captureStdout(t, func() error {
+				printHeadTrailer(&types.Issue{ID: id, Description: "withheld"}, 0, 3, false)
+				return nil
+			})
+			return out, bdLine(t, out, "head view")
+		}},
 		{"bd show raw-edge pointer", "bd dep list", func(t *testing.T, id string) (string, string) {
 			out := captureStderr(t, func() {
 				warnUnresolvableDepEdges(id, depCounts{deps: depCount{n: 1}}, depListing{rows: 0}, depListing{})
