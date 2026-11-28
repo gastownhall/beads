@@ -17,7 +17,6 @@ import (
 	"github.com/steveyegge/beads/internal/storage/domain"
 	domaingit "github.com/steveyegge/beads/internal/storage/domain/git"
 	"github.com/steveyegge/beads/internal/storage/fs"
-	"github.com/steveyegge/beads/internal/storage/git"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/workapi"
@@ -49,6 +48,10 @@ type initProxiedServerInput struct {
 	fromJSONL              bool
 	nonInteractive         bool
 	noAdopt                bool // --no-adopt: never derive a remote from git origin (GH#6099)
+}
+
+func ensureProxiedInitGitRepo(ctx context.Context, workDir string) (domain.EnsureGitRepoResult, error) {
+	return domain.NewGitUseCase(workDir, domaingit.NewInitGitRepository(workDir)).EnsureGitRepo(ctx)
 }
 
 func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxiedServerInput) error {
@@ -107,7 +110,6 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 
 	fsProvider := fs.NewFileSystemProvider(cwd, newBeadsDirTemplates(), newInitFileSystemAdapters(cwd))
 	fsUseCase := fsProvider.BeadsDirFSUseCase()
-	gitUC := git.NewGitProvider(cwd).GitUseCase()
 
 	if in.stealth {
 		if err := fsUseCase.SetupStealthMode(ctx, !in.quiet); err != nil {
@@ -146,10 +148,9 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	}
 
 	if !hasExplicitBeadsDir {
-		// Bootstrap routing is handled separately in follow-up #6460.
-		res, err := gitUC.EnsureGitRepo(ctx)
+		res, err := ensureProxiedInitGitRepo(ctx, cwd)
 		if err != nil {
-			return fmt.Errorf("failed to initialize git repository: %v", err)
+			return fmt.Errorf("failed to initialize git repository: %w", err)
 		}
 		if res.DidInit && !in.quiet {
 			fmt.Printf("  %s Initialized git repository\n", ui.RenderPass("✓"))
@@ -308,7 +309,6 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 		useLocalBeads: useLocalBeads,
 		remoteURL:     remoteURL,
 		fsUseCase:     fsUseCase,
-		gitUC:         gitUC,
 	})
 }
 
@@ -606,11 +606,14 @@ type runInitTailContext struct {
 func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initProxiedServerInput, t runInitTailContext) error {
 	gitUC := t.gitUC
 	if t.workDir != "" {
-		// Only the selected tail uses this scope; earlier bootstrap keeps its provider.
+		// Bootstrap and this selected tail use the same scrubbed Git scope.
 		// NewInitGitRepository runs `git rev-parse --git-dir` with Dir=workDir and
 		// scrubbed routing, so dropping discovery ceilings can select a containing
 		// parent repository, matching the role adapter's scrubbed reads and writes.
 		gitUC = domain.NewGitUseCase(t.workDir, domaingit.NewInitGitRepository(t.workDir))
+	}
+	if gitUC == nil {
+		return fmt.Errorf("proxied init tail requires a working directory or Git use case")
 	}
 	// One probe answers both the role gate and the artifact gates: gitUC is the
 	// scrubbed selected-directory repository whenever workDir is set, and the
