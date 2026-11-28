@@ -32,22 +32,39 @@ func ValidateCountGroup(group issueops.CountGroup) (string, error) {
 	return column, nil
 }
 
+// CountNeedsConfig reports whether BuildCountFilter reads its ListConfig for
+// this request, so a caller loads it exactly when the builder needs it.
+//
+// This lives beside the builder rather than in a caller for the reason SQLLimit
+// does (list.go): the load condition and the builder are two halves of one
+// decision, and splitting a decision across a library and its callers is how
+// the two halves drift — both #7199's ExcludeStatus gap and #6258's typed-count
+// gap were a caller guessing a narrower trigger set than the builder needed.
+func CountNeedsConfig(in issueops.CountRequest) bool {
+	return in.IncludeInfra || in.IssueType != "" || len(in.ExcludeStatus) > 0
+}
+
 // BuildCountFilter turns a count request into the storage-level filter: the
 // single definition of what `bd count` means, which every implementation of
 // issueops.Counter builds through.
 //
 // It is a SEPARATE builder rather than a call into BuildListFilter with the
 // paging fields blanked out, because the two commands disagree about the
-// default answer: a listing hides closed, pinned, template and gate rows, and a
-// count hides none of them. The one place they must agree is --include-infra,
-// pinned by a golden-style test comparing this builder's output against
-// BuildListFilter's for the same request (count_test.go, GH#4387).
+// default answer: a listing hides closed, pinned, template and gate rows, and
+// a count hides none of them. The two places they must agree are the PLANE —
+// which table a request reads, and whether a named infra type narrows to its
+// ephemeral rows; applyPlane, shared with BuildListFilter, is that agreement
+// (GH#6258) — and --include-infra, pinned by a golden-style test comparing
+// this builder's output against BuildListFilter's for the same request
+// (count_test.go, GH#4387).
 //
 // cfg supplies the workspace's infra vocabulary and its custom status names.
-// It is read under IncludeInfra AND whenever ExcludeStatus is non-empty (the
-// exclusion is validated against the workspace's statuses), so a caller must
-// load it in both cases; a zero ListConfig falls back to the default infra set
-// and the built-in statuses only.
+// It is read under IncludeInfra, whenever IssueType is set (the plane decision
+// names infra types through the workspace's set) AND whenever ExcludeStatus is
+// non-empty (the exclusion is validated against the workspace's statuses).
+// CountNeedsConfig is that trigger set as a predicate, so a caller loads the
+// config exactly when the builder reads it; a zero ListConfig falls back to
+// the default infra set and the built-in statuses only.
 func BuildCountFilter(in issueops.CountRequest, cfg ListConfig) (types.IssueFilter, error) {
 	filter := types.IssueFilter{
 		TitleSearch:         in.TitleSearch,
@@ -151,45 +168,29 @@ func BuildCountFilter(in issueops.CountRequest, cfg ListConfig) (types.IssueFilt
 	filter.ExcludeStatus = append(filter.ExcludeStatus, excluded...)
 
 	if in.IncludeInfra {
-		applyCountIncludeInfra(&filter, in.IssueType, in.IncludeEphemeral, cfg)
-	} else if !in.IncludeEphemeral {
-		filter.SkipWisps = true
+		applyCountIncludeInfra(&filter, in.IssueType)
 	}
+	// The plane is the one decision count and list must make identically, so
+	// it lives in the shared applyPlane rather than a count-local copy: two
+	// copies of this rule had already drifted on exactly the named-infra-type
+	// cell (GH#6258), which is what TestCountAndListPlaneAgreement pins.
+	applyPlane(&filter, in.IssueType, in.IncludeEphemeral, in.IncludeInfra, cfg)
 	return filter, nil
 }
 
-// applyCountIncludeInfra switches the count filter to the wisps-inclusive mode
-// of `bd list --include-infra` (GH#4387). It mirrors the BuildListFilter
-// defaults that determine list's cardinality so that, for any filter set,
-// `bd count --include-infra <filters>` returns exactly the number of rows
-// `bd list --include-infra <filters> --all` materializes:
-//
-//   - the wisps table is merged in (SkipWisps=false), picking up no_history
-//     beads and ephemeral wisps, like list's merge path;
-//   - template molecules are excluded (list's default);
-//   - gate beads are excluded unless requested via --type gate;
-//   - counting an infra type (agent/role/message, or the store-configured set)
-//     routes to the ephemeral wisps tier, like list's infra-type listing —
-//     unless includeEphemeral is also set, which lifts that narrowing on both
-//     builders, so the durable rows of that type are counted as they are
-//     listed.
-//
-// A count without IncludeInfra never calls this. It keeps its historical
-// durable-only semantics unless IncludeEphemeral admits the wisps tier: the
-// first of the changes above, with none of the rest.
-func applyCountIncludeInfra(filter *types.IssueFilter, issueType string, includeEphemeral bool, cfg ListConfig) {
-	filter.SkipWisps = false
-
+// applyCountIncludeInfra applies the two `--include-infra` exclusions a count
+// borrows from `bd list --include-infra` (GH#4387): template molecules are
+// excluded (list's default), and gate beads are excluded unless requested via
+// --type gate. The wisps-inclusive mode's other half — which table is read,
+// and whether a named infra type narrows to its ephemeral rows — is the plane
+// decision, and it is applyPlane's, shared with BuildListFilter, so a count
+// and a listing answer the same request from the same plane (GH#6258).
+func applyCountIncludeInfra(filter *types.IssueFilter, issueType string) {
 	isTemplate := false
 	filter.IsTemplate = &isTemplate
 
 	if issueType != "gate" {
 		filter.ExcludeTypes = append(filter.ExcludeTypes, "gate")
-	}
-
-	if issueType != "" && cfg.IsInfra(issueType) && !includeEphemeral {
-		ephemeral := true
-		filter.Ephemeral = &ephemeral
 	}
 }
 

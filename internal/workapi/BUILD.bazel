@@ -40,6 +40,7 @@ go_test(
     name = "workapi_test",
     srcs = [
         "bootstrap_test.go",
+        "count_infra_type_repro_test.go",
         "count_skipwisps_test.go",
         "count_test.go",
         "delete_test.go",
