@@ -5,6 +5,10 @@ package embeddeddolt
 import (
 	"strings"
 	"testing"
+
+	doltembed "github.com/dolthub/driver/v2"
+
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 func TestBuildDSN_SpacesInPath(t *testing.T) {
@@ -12,7 +16,7 @@ func TestBuildDSN_SpacesInPath(t *testing.T) {
 	// percent-encoded (%20) because the Dolt driver's ParseDataSource
 	// uses the path as a literal filesystem path.
 	dir := "/Users/bbrenner/Documents/Scripting Projects/beads/.beads/embeddeddolt"
-	dsn := buildDSN(dir, "beads")
+	dsn := buildDSN(dir, "beads", versioncontrolops.Committer{})
 
 	if !strings.HasPrefix(dsn, "file://") {
 		t.Fatalf("DSN should start with file://, got %q", dsn)
@@ -39,15 +43,29 @@ func TestBuildDSN_SpacesInPath(t *testing.T) {
 }
 
 func TestBuildDSN_NoDatabase(t *testing.T) {
-	dsn := buildDSN("/tmp/test", "")
+	dsn := buildDSN("/tmp/test", "", versioncontrolops.Committer{})
 	if strings.Contains(dsn, "database=") {
 		t.Errorf("DSN should not contain database param when empty; got %q", dsn)
 	}
 }
 
 func TestBuildDSN_WithDatabase(t *testing.T) {
-	dsn := buildDSN("/tmp/test", "mydb")
+	dsn := buildDSN("/tmp/test", "mydb", versioncontrolops.Committer{})
 	if !strings.Contains(dsn, "database=mydb") {
 		t.Errorf("DSN should contain database=mydb; got %q", dsn)
+	}
+}
+
+// TestBuildDSN_CarriesTheCommitter pins the identity the DSN hands the
+// embedded engine, which Dolt uses for the commits the engine makes itself
+// (#7628): the driver's own DSN parser must read back the committer.
+func TestBuildDSN_CarriesTheCommitter(t *testing.T) {
+	committer := versioncontrolops.Committer{Name: "Jane Doe", Email: "jane@example.com"}
+	cfg, err := doltembed.ParseDSN(buildDSN(t.TempDir(), "mydb", committer))
+	if err != nil {
+		t.Fatalf("ParseDSN: %v", err)
+	}
+	if cfg.CommitName != committer.Name || cfg.CommitEmail != committer.Email {
+		t.Errorf("DSN committer = %q / %q, want %q / %q", cfg.CommitName, cfg.CommitEmail, committer.Name, committer.Email)
 	}
 }

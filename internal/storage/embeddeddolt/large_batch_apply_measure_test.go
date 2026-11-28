@@ -39,8 +39,9 @@ import (
 	"github.com/steveyegge/beads/issueops"
 )
 
-// measureCommitName/measureCommitEmail mirror open.go's commitName/commitEmail,
-// duplicated because those are unexported.
+// measureCommitName/measureCommitEmail mirror the default identity buildDSN
+// writes when GIT_AUTHOR_* is unset (versioncontrolops.DefaultCommitterName
+// and DefaultCommitterEmail), duplicated to keep this measurement's DSN fixed.
 const (
 	measureCommitName  = "beads"
 	measureCommitEmail = "beads@local"
