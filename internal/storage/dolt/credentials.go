@@ -691,6 +691,18 @@ func (s *DoltStore) prepareCLIRouteForPeerCredentials(ctx context.Context, peer 
 	return false, nil
 }
 
+// prepareCLIRouteForPeer reports whether a peer push, pull or fetch that
+// passed the git-protocol check runs through the dolt CLI: for stored peer
+// credentials, or, as for the default remote, for cloud credentials of the
+// peer URL's scheme in this process's environment, which an external server
+// started earlier cannot see (GH#6).
+func (s *DoltStore) prepareCLIRouteForPeer(ctx context.Context, peer string, creds *remoteCredentials) (bool, error) {
+	if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil || useCLI {
+		return useCLI, err
+	}
+	return s.prepareCLIRouteForCloudAuth(ctx, peer)
+}
+
 func (s *DoltStore) shouldUseCLIForPeerCredentialsWithError(ctx context.Context, peer string, creds *remoteCredentials) (bool, error) {
 	return s.prepareCLIRouteForPeerCredentials(ctx, peer, creds)
 }
