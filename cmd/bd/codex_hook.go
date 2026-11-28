@@ -21,11 +21,11 @@ const (
 
 var codexHookMarkerDirOverride string
 
-var codexHookExecPrime = func(ctx context.Context, memoriesOnly bool) (string, error) {
+var codexHookExecPrime = func(ctx context.Context, cwd string, memoriesOnly bool) (string, error) {
 	if memoriesOnly {
-		return runBdPrime(ctx, "--memories-only")
+		return runBdPrimeInDir(ctx, cwd, "--memories-only")
 	}
-	return runBdPrime(ctx)
+	return runBdPrimeInDir(ctx, cwd)
 }
 
 type codexHookInput struct {
@@ -76,9 +76,9 @@ func runCodexHook(ctx context.Context, event string, stdin io.Reader, stdout io.
 
 	switch event {
 	case codexHookSessionStart:
-		return codexHookInjectPrime(ctx, stdout, codexHookSessionStart)
+		return codexHookInjectPrime(ctx, input.CWD, stdout, codexHookSessionStart)
 	case codexHookPreCompact:
-		return codexHookPreCompactCheck(ctx, stdout)
+		return codexHookPreCompactCheck(ctx, input.CWD, stdout)
 	case codexHookPostCompact:
 		return codexHookMarkNeedsRefresh(input)
 	case codexHookUserPromptSubmit:
@@ -88,16 +88,19 @@ func runCodexHook(ctx context.Context, event string, stdin io.Reader, stdout io.
 	}
 }
 
-func codexHookInjectPrime(ctx context.Context, stdout io.Writer, event string) error {
-	out, err := codexHookExecPrime(ctx, false)
-	if err != nil || strings.TrimSpace(out) == "" {
+func codexHookInjectPrime(ctx context.Context, cwd string, stdout io.Writer, event string) error {
+	out, err := codexHookExecPrime(ctx, cwd, false)
+	if err != nil {
+		return writeCodexHookSystemMessage(stdout, fmt.Sprintf("Beads context injection failed: %v", err))
+	}
+	if strings.TrimSpace(out) == "" {
 		return nil
 	}
 	return writeCodexHookAdditionalContext(stdout, event, out)
 }
 
-func codexHookPreCompactCheck(ctx context.Context, stdout io.Writer) error {
-	if _, err := codexHookExecPrime(ctx, true); err != nil {
+func codexHookPreCompactCheck(ctx context.Context, cwd string, stdout io.Writer) error {
+	if _, err := codexHookExecPrime(ctx, cwd, true); err != nil {
 		return writeCodexHookSystemMessage(stdout, fmt.Sprintf("Beads context check failed before compaction: %v", err))
 	}
 	return nil
@@ -112,7 +115,7 @@ func codexHookMaybeRefresh(ctx context.Context, input codexHookInput, stdout io.
 	if _, err := os.Stat(path); err != nil {
 		return nil
 	}
-	out, err := codexHookExecPrime(ctx, false)
+	out, err := codexHookExecPrime(ctx, input.CWD, false)
 	if err != nil {
 		return writeCodexHookSystemMessage(stdout, fmt.Sprintf("Beads context refresh after compaction failed: %v", err))
 	}
