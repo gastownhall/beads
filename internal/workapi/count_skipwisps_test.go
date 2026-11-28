@@ -3,6 +3,7 @@ package workapi
 import (
 	"testing"
 
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -144,28 +145,24 @@ func TestCountIncludeEphemeralIsThePlaneBitAndNothingElse(t *testing.T) {
 	}
 }
 
-// TestCountAndListPlaneAgreement pins how count and list decide the PLANE for
-// the same request — including the ONE case where they disagree.
+// TestCountAndListPlaneAgreement pins that count and list decide the PLANE
+// the same way for the same request: whether the wisps table is read
+// (SkipWisps) and whether a named infra type is narrowed to its ephemeral rows
+// (Ephemeral), across every combination of a named type and the two plane
+// flags, --include-ephemeral and --include-infra.
 //
-// The name is not "AgreeOnThePlane" because they do not always agree, and a
-// test that claimed they did would be asserting a property the code lacks. For
-// an INFRA type they diverge: list reads the plane (applyTypeSuppressions
-// exempts infra types) while count does not, so `bd count --type agent` answers
-// 0 where `bd list --type agent` returns rows.
+// Until GH#6258 an infra type diverged: list read the plane for it while
+// count's arm was a bare `else { SkipWisps = true }`, so `bd count --type
+// agent` answered 0 where `bd list --type agent` returned rows. Both builders
+// now decide the plane through applyPlane.
 //
-// That divergence predates the flag — the count arm is a bare `else {
-// SkipWisps = true }`, so it answers 0 for an infra type with or without this
-// change. It is pinned here, not fixed: the fix is a separate decision about
-// what naming an infra type should admit, and this change deliberately alters
-// nothing about the default arm.
-//
-// It asserts the ABSOLUTE expected value as well as the agreement. Agreement
-// alone is satisfied by a regression that turns the flag into a no-op on BOTH
+// It asserts the ABSOLUTE expected values as well as the agreement. Agreement
+// alone is satisfied by a regression that turns a flag into a no-op on BOTH
 // builders, which is exactly the drift this exists to catch.
 //
 // It deliberately says nothing about the two answers being equal in ROWS: a
-// count includes templates and a listing does not, with or without this flag.
-// See issueops.CountRequest.IncludeEphemeral.
+// count includes templates and a listing does not, with or without these
+// flags. See issueops.CountRequest.IncludeEphemeral.
 func TestCountAndListPlaneAgreement(t *testing.T) {
 	// CustomTypes admits "agent" into the workspace vocabulary (BuildListFilter
 	// rejects a type it does not know), and the default InfraSet already treats
@@ -177,39 +174,50 @@ func TestCountAndListPlaneAgreement(t *testing.T) {
 		name             string
 		issueType        string
 		includeEphemeral bool
-		wantCountSkip    bool
-		wantAgree        bool
+		includeInfra     bool
+		wantSkip         bool
+		wantEphemeral    bool
 	}{
-		{"default", "", false, true, true},
-		{"named type", "task", false, true, true},
-		{"include-ephemeral", "", true, false, true},
-		{"named type + include-ephemeral", "task", true, false, true},
-		// The known divergence. list reads the plane for an infra type, count
-		// does not; --include-ephemeral recovers count.
-		{"infra type diverges", "agent", false, true, false},
-		{"infra type + include-ephemeral", "agent", true, false, true},
+		{"default", "", false, false, true, false},
+		{"named type", "task", false, false, true, false},
+		{"include-ephemeral", "", true, false, false, false},
+		{"named type + include-ephemeral", "task", true, false, false, false},
+		{"include-infra", "", false, true, false, false},
+		{"named type + include-infra", "task", false, true, false, false},
+		{"include-infra + include-ephemeral", "", true, true, false, false},
+		// An infra type reads the plane, narrowed to its ephemeral rows (GH#6258).
+		{"infra type", "agent", false, false, false, true},
+		// --include-ephemeral lifts the narrowing; --include-infra keeps it.
+		{"infra type + include-ephemeral", "agent", true, false, false, false},
+		{"infra type + include-infra", "agent", false, true, false, true},
+		{"infra type + include-infra + include-ephemeral", "agent", true, true, false, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			listFilter, err := BuildListFilter(issueops.ListRequest{
-				IssueType: tt.issueType, IncludeEphemeral: tt.includeEphemeral,
+				IssueType: tt.issueType, IncludeEphemeral: tt.includeEphemeral, IncludeInfra: tt.includeInfra,
 			}, cfg)
 			if err != nil {
 				t.Fatalf("BuildListFilter: %v", err)
 			}
 			countFilter, err := BuildCountFilter(issueops.CountRequest{
-				IssueType: tt.issueType, IncludeEphemeral: tt.includeEphemeral,
+				IssueType: tt.issueType, IncludeEphemeral: tt.includeEphemeral, IncludeInfra: tt.includeInfra,
 			}, cfg)
 			if err != nil {
 				t.Fatalf("BuildCountFilter: %v", err)
 			}
-			if countFilter.SkipWisps != tt.wantCountSkip {
-				t.Errorf("count SkipWisps = %v, want %v", countFilter.SkipWisps, tt.wantCountSkip)
-			}
-			agree := listFilter.SkipWisps == countFilter.SkipWisps
-			if agree != tt.wantAgree {
-				t.Errorf("list SkipWisps=%v count SkipWisps=%v (agree=%v), want agree=%v — "+
-					"a change to either builder alone lands here",
-					listFilter.SkipWisps, countFilter.SkipWisps, agree, tt.wantAgree)
+			for _, side := range []struct {
+				name   string
+				filter types.IssueFilter
+			}{{"count", countFilter}, {"list", listFilter}} {
+				if side.filter.SkipWisps != tt.wantSkip {
+					t.Errorf("%s SkipWisps = %v, want %v", side.name, side.filter.SkipWisps, tt.wantSkip)
+				}
+				if side.filter.Ephemeral != nil && !*side.filter.Ephemeral {
+					t.Errorf("%s Ephemeral = false, want nil or true: nothing narrows to the durable rows", side.name)
+				}
+				if got := side.filter.Ephemeral != nil; got != tt.wantEphemeral {
+					t.Errorf("%s narrows to Ephemeral=true: %v, want %v", side.name, got, tt.wantEphemeral)
+				}
 			}
 		})
 	}
