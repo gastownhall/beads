@@ -401,6 +401,14 @@ func ResolveStateIDForBeadsStatus(cache *StateCache, status types.Status, config
 			nameMatches = append(nameMatches, state)
 		}
 	}
+	// A state named after its own type ("Canceled", "Backlog") is reached by
+	// a type-keyed entry here as well, so its name match would win over the
+	// type pass and hide that pass's ambiguity check: with completed and
+	// canceled both mapped to closed, every closed issue would go to
+	// "Canceled". Leave such states to the type pass.
+	nameMatches = slices.DeleteFunc(nameMatches, func(state State) bool {
+		return strings.EqualFold(strings.TrimSpace(state.Name), strings.TrimSpace(state.Type))
+	})
 	if len(nameMatches) == 1 {
 		return nameMatches[0].ID, nil
 	}
