@@ -2,10 +2,15 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/remedy"
 )
 
 // captureLegacyUpgradeWarnings redirects guard warnings for the duration of a
@@ -37,6 +42,11 @@ func TestClassifyVersionWitness(t *testing.T) {
 		{name: "prerelease and build metadata", version: "v2.0.0-beta.1+darwin.arm64", want: witnessEraCurrent},
 		{name: "major only", version: "v3", want: witnessEraCurrent},
 		{name: "surrounding whitespace", version: "  1.1.0\n", want: witnessEraCurrent},
+		// A Homebrew --HEAD build stamps its own shape, not semver (GH#5603).
+		{name: "brew head stamp", version: "HEAD-f925f3f", want: witnessEraCurrent},
+		{name: "bare brew head stamp", version: "HEAD", want: witnessEraCurrent},
+		{name: "brew head stamp with revision", version: "HEAD-f925f3f_1", want: witnessEraCurrent},
+		{name: "brew head stamp with newline", version: "HEAD-f925f3f\n", want: witnessEraCurrent},
 
 		{name: "historical server release", version: "0.62.0", want: witnessEraLegacy},
 		{name: "historical v-prefixed release", version: "v0.9.1", want: witnessEraLegacy},
@@ -48,6 +58,9 @@ func TestClassifyVersionWitness(t *testing.T) {
 		{name: "whitespace only", version: "   ", want: witnessEraUnknown},
 		{name: "genuine garbage", version: "not-a-version", want: witnessEraUnknown},
 		{name: "truncated binary noise", version: "\x00\x01\x02", want: witnessEraUnknown},
+		{name: "brew head lookalike dirty", version: "HEAD-f925f3f-dirty", want: witnessEraUnknown},
+		{name: "brew head lookalike non-hex", version: "HEAD-zzzzzzz", want: witnessEraUnknown},
+		{name: "brew head lookalike lowercase", version: "head", want: witnessEraUnknown},
 	}
 
 	for _, tt := range tests {
@@ -267,8 +280,8 @@ func TestLegacyUpgradeGuardWarnsInsteadOfRefusingUnreadableWitness(t *testing.T)
 // TestLegacyUpgradeGuardWarningIsSelfHealing models the PersistentPreRunE
 // order — guard, then trackBdVersion — to show the warning is one-shot: the
 // admitted command rewrites the witness with this binary's own version, so the
-// next command reads it cleanly. Only a stamp bd rewrites identically every
-// run (a Homebrew --HEAD build, GH#5603) can warn repeatedly.
+// next command reads it cleanly. A Homebrew --HEAD stamp, which bd rewrites
+// identically every run, is read as current and never warns (GH#5603).
 func TestLegacyUpgradeGuardWarningIsSelfHealing(t *testing.T) {
 	pinLegacyUpgradeGuardEnv(t)
 	warnings := captureLegacyUpgradeWarnings(t)
@@ -297,19 +310,104 @@ func TestLegacyUpgradeGuardWarningIsSelfHealing(t *testing.T) {
 
 // TestLegacyUpgradeGuardAdmitsBrewHeadStamp covers the reporter's scenario in
 // GH#5603: Homebrew stamps HEAD-<shortsha> into main.Version for --HEAD
-// installs, bd writes it verbatim, and the workspace must still open. The
-// unknown era admits it. Silencing the repeated warning for that stable stamp
-// needs the shape recognizer in GH#5625 (anisoptera), which this does not
-// duplicate.
+// installs, bd writes it verbatim, and the workspace must open without the
+// unreadable-witness warning. bd rewrites the same stamp on every run, so a
+// warning here would repeat on every command.
 func TestLegacyUpgradeGuardAdmitsBrewHeadStamp(t *testing.T) {
 	pinLegacyUpgradeGuardEnv(t)
 	for _, stamp := range []string{"HEAD-f925f3f", "HEAD", "HEAD-f925f3f_1"} {
 		t.Run(stamp, func(t *testing.T) {
-			captureLegacyUpgradeWarnings(t)
+			warnings := captureLegacyUpgradeWarnings(t)
 			beadsDir := writeSelectedServerWorkspace(t, stamp)
 
 			if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
 				t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want nil", err)
+			}
+			if warnings.Len() != 0 {
+				t.Fatalf("guard warned about a brew --HEAD stamp: %q", warnings.String())
+			}
+		})
+	}
+}
+
+// TestLegacyUpgradeGuardBrewHeadStampMatchesReleaseWitness is the identity
+// invariant of the reclassification: in server and embedded mode alike, the
+// guard's outcome for a brew --HEAD stamp (error and warning bytes) equals its
+// outcome for a 1.x release witness, and the guard leaves the witness file's
+// hash unchanged.
+func TestLegacyUpgradeGuardBrewHeadStampMatchesReleaseWitness(t *testing.T) {
+	pinLegacyUpgradeGuardEnv(t)
+	type outcome struct{ err, warning string }
+	guard := func(t *testing.T, write func(*testing.T, string) string, witness string) outcome {
+		t.Helper()
+		warnings := captureLegacyUpgradeWarnings(t)
+		beadsDir := write(t, witness)
+		path := filepath.Join(beadsDir, localVersionFile)
+		hashBefore := witnessFileHash(t, path)
+		err := guardLegacyUpgradeWorkspace(beadsDir)
+		if hashAfter := witnessFileHash(t, path); hashAfter != hashBefore {
+			t.Fatalf("guard rewrote the %q witness: hash %s, want %s", witness, hashAfter, hashBefore)
+		}
+		// Each run has its own temp dir; compare outcomes with it masked.
+		got := outcome{warning: strings.ReplaceAll(warnings.String(), beadsDir, "<beads>")}
+		if err != nil {
+			got.err = strings.ReplaceAll(err.Error(), beadsDir, "<beads>")
+		}
+		return got
+	}
+	modes := []struct {
+		name  string
+		write func(*testing.T, string) string
+	}{
+		{name: "server", write: writeSelectedServerWorkspace},
+		{name: "embedded", write: func(t *testing.T, witness string) string {
+			return writeDoltRootWorkspace(t, `{"backend":"dolt"}`, "", witness)
+		}},
+	}
+	for _, mode := range modes {
+		t.Run(mode.name, func(t *testing.T) {
+			release := guard(t, mode.write, "1.1.0")
+			if mode.name == "server" && release != (outcome{}) {
+				t.Fatalf("release witness outcome = %+v, want admitted without a warning", release)
+			}
+			// Identity: the stamp is indistinguishable from a release witness.
+			if head := guard(t, mode.write, "HEAD-f925f3f"); head != release {
+				t.Fatalf("brew --HEAD outcome = %+v, want the release witness outcome %+v", head, release)
+			}
+		})
+	}
+}
+
+// witnessFileHash returns the sha256 of the version witness at path.
+func witnessFileHash(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(data))
+}
+
+// TestLegacyUpgradeGuardBrewHeadLookalikeStillWarns keeps the recognizer
+// bounded: a stamp brew never emits is still an unreadable witness, and the
+// server-mode warning for it stays byte-for-byte unchanged from main.
+func TestLegacyUpgradeGuardBrewHeadLookalikeStillWarns(t *testing.T) {
+	pinLegacyUpgradeGuardEnv(t)
+	for _, stamp := range []string{"HEAD-f925f3f-dirty", "HEAD-zzzzzzz", "head", "not-a-version"} {
+		t.Run(stamp, func(t *testing.T) {
+			warnings := captureLegacyUpgradeWarnings(t)
+			beadsDir := writeSelectedServerWorkspace(t, stamp)
+
+			if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+				t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want nil", err)
+			}
+			// Spelled out, not rebuilt from the warning helper, so any change to
+			// the unaffected path's output fails here.
+			want := "Warning: unreadable version witness " + strconv.Quote(stamp) + " in " +
+				remedy.PrintedValue(filepath.Join(beadsDir, localVersionFile)) +
+				"; assuming a current workspace. Run 'bd doctor' to reset version tracking.\n"
+			if got := warnings.String(); got != want {
+				t.Fatalf("guard warning changed:\n got %q\nwant %q", got, want)
 			}
 		})
 	}
@@ -327,6 +425,7 @@ func TestVersionWitnessRoundTrip(t *testing.T) {
 		"1.2.0+build.5",
 		"v1.1.1-0.20260805093327-bf97b73749ac",
 		"v2.0.0-beta.1+darwin.arm64",
+		"HEAD-f925f3f", // a Homebrew --HEAD build (GH#5603)
 	}
 
 	for _, version := range versions {
