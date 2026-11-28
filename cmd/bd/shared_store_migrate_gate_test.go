@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -199,6 +200,455 @@ func TestSharedServerVersionBumpDoesNotPromoteCursor(t *testing.T) {
 	if got := cursor(); got != schema.LatestVersion() {
 		t.Fatalf("cursor = %d after bd migrate schema, want %d", got, schema.LatestVersion())
 	}
+}
+
+// staleVersionWitness writes the one-shot .local_version that makes the next
+// bd command run its post-upgrade reconciliation: a recorded version below
+// this binary's arms versionUpgradeDetected for exactly that one command
+// (trackBdVersion rewrites the file as it fires).
+func staleVersionWitness(t *testing.T, beadsDir, previous string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(beadsDir, localVersionFile), []byte(previous+"\n"), 0o600); err != nil {
+		t.Fatalf("write stale %s: %v", localVersionFile, err)
+	}
+}
+
+// TestServerVersionBumpWithoutLocalDoltDir is gastownhall/beads#7038's AC-2
+// end to end. A server-mode workspace keeps its database on the dolt
+// sql-server and routinely has NO local Dolt data directory — that is the
+// shared-server consumer shape the issue is about. The version-bump
+// reconciliation used to treat the absent directory as "no database" and
+// return before ever opening the server's database, so after the documented
+// pull-then-upgrade recipe the clone-local (dolt-ignored) schema series never
+// arrived and every read-only command failed on its missing columns. The
+// local-directory prerequisite must stay for genuinely local backends, but a
+// server-mode workspace's database is the server's, and only the factory open
+// (CreateIfMissing stays false) may say it is missing.
+//
+// Every phase below deliberately creates NO local dolt data dir.
+//
+// The pre-v0.56 recovery edge of this change — a server-mode workspace must
+// never run the .dolt-deleting recovery against its local path — cannot be
+// reached through the CLI: its witness is by definition pre-1.0, and the
+// cross-era legacy guard refuses such a workspace at admission. It is pinned
+// in-process by TestAutoMigrateOnVersionBump_ServerModeSkipsPreV56Recovery.
+func TestServerVersionBumpWithoutLocalDoltDir(t *testing.T) {
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available, skipping")
+	}
+
+	bd := buildBDForInitTests(t)
+	// newServerWorkspace builds the #7038 workspace: a server-mode config, a
+	// database on the test server with one readable issue, and a run helper
+	// whose environment strips every BEADS_/BD_ variable that could reroute
+	// the CLI away from that config. No local dolt data dir is created.
+	newServerWorkspace := func(prefix string) (beadsDir string, admin *sql.DB, run func(args ...string) (string, string, int)) {
+		repo := t.TempDir()
+		beadsDir = filepath.Join(repo, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatalf("create .beads: %v", err)
+		}
+		database := uniqueTestDBName(t)
+		if err := (&configfile.Config{
+			Backend:        configfile.BackendDolt,
+			DoltMode:       configfile.DoltModeServer,
+			DoltServerHost: "127.0.0.1",
+			DoltServerPort: testDoltServerPort,
+			DoltDatabase:   database,
+		}).Save(beadsDir); err != nil {
+			t.Fatalf("save metadata: %v", err)
+		}
+		ctx := context.Background()
+		store, err := dolt.New(ctx, &dolt.Config{
+			Path:            filepath.Join(beadsDir, "dolt"),
+			BeadsDir:        beadsDir,
+			ServerHost:      "127.0.0.1",
+			ServerPort:      testDoltServerPort,
+			Database:        database,
+			CreateIfMissing: true,
+		})
+		if err != nil {
+			t.Fatalf("create test store: %v", err)
+		}
+		if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
+			t.Fatalf("set issue_prefix: %v", err)
+		}
+		now := time.Now()
+		if err := store.CreateIssue(ctx, &types.Issue{
+			ID:        prefix + "-1",
+			Title:     "Readable once the upgrade completes",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}, "test-user"); err != nil {
+			t.Fatalf("create issue: %v", err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatalf("close setup store: %v", err)
+		}
+		t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+		admin, err = sql.Open("mysql", doltutil.ServerDSN{
+			Host: "127.0.0.1", Port: testDoltServerPort, User: "root", Database: database,
+		}.String())
+		if err != nil {
+			t.Fatalf("connect to test dolt server: %v", err)
+		}
+		t.Cleanup(func() { admin.Close() })
+		run = func(args ...string) (string, string, int) {
+			t.Helper()
+			cmd := exec.Command(bd, args...)
+			cmd.Dir = repo
+			cmd.Env = append(filteredEnvForContextBinding("BEADS_DIR", "BEADS_DB", "BD_DB",
+				"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_DATABASE", schema.AllowRemoteMigrateEnv,
+				schema.AllowMigrateEnv, "BD_IGNORE_SCHEMA_SKEW"),
+				"HOME="+t.TempDir(),
+				"XDG_CONFIG_HOME="+t.TempDir(),
+				"BEADS_TEST_MODE=1",
+				"BEADS_TEST_SERVER=1",
+				"BEADS_DIR="+beadsDir,
+				"BD_DEBUG=1",
+				schema.AllowRemoteMigrateEnv+"=0",
+			)
+			var stdout, stderr strings.Builder
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			code := 0
+			if err := cmd.Run(); err != nil {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) {
+					t.Fatalf("running bd %v: %v", args, err)
+				}
+				code = exitErr.ExitCode()
+			}
+			return stdout.String(), stderr.String(), code
+		}
+		return beadsDir, admin, run
+	}
+
+	t.Run("repairs a behind clone-local series", func(t *testing.T) {
+		beadsDir, admin, run := newServerWorkspace("svb")
+		ctx := context.Background()
+
+		// The #7038 database shape: main series current (the pull brought it),
+		// clone-local series behind with granted_node — ignored/0016 — missing,
+		// exactly what `bd dolt pull` on a pre-0016 binary leaves. Both objects
+		// are dolt-ignored, so the working set stays clean.
+		for _, stmt := range []string{
+			"ALTER TABLE leases DROP COLUMN granted_node",
+			"DELETE FROM ignored_schema_migrations WHERE version > 13",
+		} {
+			if _, err := admin.ExecContext(ctx, stmt); err != nil {
+				t.Fatalf("%s: %v", stmt, err)
+			}
+		}
+		staleVersionWitness(t, beadsDir, "1.0.0")
+
+		stdout, stderr, code := run("list")
+		if code != 0 || !strings.Contains(stdout, "svb-1") {
+			t.Fatalf("bd list after the upgrade = exit %d, want the reconciliation's authorized maintenance open to repair the clone-local series so the read works\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		var ignored int
+		if err := admin.QueryRowContext(ctx,
+			"SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations").Scan(&ignored); err != nil {
+			t.Fatalf("read ignored cursor: %v", err)
+		}
+		if ignored != schema.LatestIgnoredVersion() {
+			t.Errorf("ignored cursor = %d after the reconciliation, want %d: the hook must reach the server's database and apply the clone-local series", ignored, schema.LatestIgnoredVersion())
+		}
+		var granted int
+		if err := admin.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'leases' AND column_name = 'granted_node'").Scan(&granted); err != nil {
+			t.Fatalf("probe granted_node: %v", err)
+		}
+		if granted != 1 {
+			t.Errorf("granted_node column count = %d after the reconciliation, want 1", granted)
+		}
+		if _, err := os.Stat(filepath.Join(beadsDir, "dolt")); !os.IsNotExist(err) {
+			t.Errorf("the reconciliation created a local dolt data directory at %s; a server-mode workspace keeps no database there", filepath.Join(beadsDir, "dolt"))
+		}
+	})
+
+	t.Run("still refuses to promote a shared database's main cursor", func(t *testing.T) {
+		beadsDir, admin, run := newServerWorkspace("shg")
+		ctx := context.Background()
+
+		// The #5920 shape: main series behind by its cursor alone, so reads
+		// keep working while the co-resident clients decide who migrates.
+		if _, err := admin.ExecContext(ctx,
+			"DELETE FROM schema_migrations WHERE version = ?", schema.LatestVersion()); err != nil {
+			t.Fatalf("regress schema_migrations: %v", err)
+		}
+		behind := schema.LatestVersion() - 1
+		staleVersionWitness(t, beadsDir, "1.0.0")
+
+		stdout, stderr, code := run("list")
+		if code != 0 || !strings.Contains(stdout, "shg-1") {
+			t.Fatalf("bd list on a cursor-behind shared database = exit %d, want a working read\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		if !strings.Contains(stderr, "not auto-applying") || !strings.Contains(stderr, "bd migrate schema") {
+			t.Errorf("expected the one-shot shared-store refusal notice on stderr — reaching the gate without a local directory must surface it, not silence it:\n%s", stderr)
+		}
+		var cursor int
+		if err := admin.QueryRowContext(ctx,
+			"SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&cursor); err != nil {
+			t.Fatalf("read schema cursor: %v", err)
+		}
+		if cursor != behind {
+			t.Fatalf("bd list promoted the shared schema cursor from %d to %d — this IS gastownhall/beads#5920", behind, cursor)
+		}
+	})
+
+	t.Run("does not create a missing target database", func(t *testing.T) {
+		repo := t.TempDir()
+		beadsDir := filepath.Join(repo, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatalf("create .beads: %v", err)
+		}
+		database := uniqueTestDBName(t)
+		if err := (&configfile.Config{
+			Backend:        configfile.BackendDolt,
+			DoltMode:       configfile.DoltModeServer,
+			DoltServerHost: "127.0.0.1",
+			DoltServerPort: testDoltServerPort,
+			DoltDatabase:   database,
+		}).Save(beadsDir); err != nil {
+			t.Fatalf("save metadata: %v", err)
+		}
+		t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+		staleVersionWitness(t, beadsDir, "1.0.0")
+
+		bd := buildBDForInitTests(t)
+		cmd := exec.Command(bd, "list")
+		cmd.Dir = repo
+		cmd.Env = append(filteredEnvForContextBinding("BEADS_DIR", "BEADS_DB", "BD_DB",
+			"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_DATABASE", schema.AllowRemoteMigrateEnv,
+			schema.AllowMigrateEnv, "BD_IGNORE_SCHEMA_SKEW"),
+			"HOME="+t.TempDir(),
+			"XDG_CONFIG_HOME="+t.TempDir(),
+			"BEADS_TEST_MODE=1",
+			"BEADS_TEST_SERVER=1",
+			"BEADS_DIR="+beadsDir,
+			"BD_DEBUG=1",
+			schema.AllowRemoteMigrateEnv+"=0",
+		)
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("running bd list: %v\nstderr:\n%s", err, stderr.String())
+		}
+
+		ctx := context.Background()
+		admin, err := sql.Open("mysql", doltutil.ServerDSN{
+			Host: "127.0.0.1", Port: testDoltServerPort, User: "root",
+		}.String())
+		if err != nil {
+			t.Fatalf("connect to test dolt server: %v", err)
+		}
+		defer func() { admin.Close() }()
+		var created int
+		if err := admin.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = ?", database).Scan(&created); err != nil {
+			t.Fatalf("probe schemata: %v", err)
+		}
+		if created != 0 {
+			t.Errorf("the reconciliation created database %s; the maintenance open must keep CreateIfMissing off", database)
+		}
+		if _, err := os.Stat(filepath.Join(beadsDir, "dolt")); !os.IsNotExist(err) {
+			t.Errorf("the reconciliation created a local dolt data directory at %s", filepath.Join(beadsDir, "dolt"))
+		}
+	})
+}
+
+// TestCloneLocalRefusalOpenPolicy pins #7038 AC-4's open-time policy matrix
+// around the clone-local refusal: only the authorized maintenance paths may
+// repair a behind clone-local series. Strict --readonly and an active
+// maintenance freeze both skip the version-bump reconciliation entirely —
+// and leave its one-shot witness unconsumed — so their reads meet the typed
+// refusal with the database untouched; a preview never asks for a readable
+// schema, so it keeps reporting through its own query instead of the
+// refusal. Gateway and diagnostic opens are pinned in
+// internal/storage/dolt's TestDoltNew_CloneLocalReadableSchema.
+//
+// Deliberately self-contained (no fixtures from the version-bump tests
+// above): it pins policy that predates the refusal itself, so it must run
+// unchanged against a base that rejects no clone-local schema.
+func TestCloneLocalRefusalOpenPolicy(t *testing.T) {
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available, skipping")
+	}
+
+	// newRegressedWorkspace creates a server-mode workspace on the #7038
+	// shape: main series current, clone-local series behind with
+	// granted_node — ignored/0016 — missing, no local dolt data dir.
+	newRegressedWorkspace := func(prefix string) (repo, beadsDir string, admin *sql.DB, run func(args ...string) (string, string, int)) {
+		repo = t.TempDir()
+		beadsDir = filepath.Join(repo, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatalf("create .beads: %v", err)
+		}
+		database := uniqueTestDBName(t)
+		if err := (&configfile.Config{
+			Backend:        configfile.BackendDolt,
+			DoltMode:       configfile.DoltModeServer,
+			DoltServerHost: "127.0.0.1",
+			DoltServerPort: testDoltServerPort,
+			DoltDatabase:   database,
+		}).Save(beadsDir); err != nil {
+			t.Fatalf("save metadata: %v", err)
+		}
+		ctx := context.Background()
+		store, err := dolt.New(ctx, &dolt.Config{
+			Path:            filepath.Join(beadsDir, "dolt"),
+			BeadsDir:        beadsDir,
+			ServerHost:      "127.0.0.1",
+			ServerPort:      testDoltServerPort,
+			Database:        database,
+			CreateIfMissing: true,
+		})
+		if err != nil {
+			t.Fatalf("create test store: %v", err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatalf("close setup store: %v", err)
+		}
+		t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+		admin, err = sql.Open("mysql", doltutil.ServerDSN{
+			Host: "127.0.0.1", Port: testDoltServerPort, User: "root", Database: database,
+		}.String())
+		if err != nil {
+			t.Fatalf("connect to test dolt server: %v", err)
+		}
+		t.Cleanup(func() { admin.Close() })
+		// Both objects are dolt-ignored, so the working set stays clean.
+		for _, stmt := range []string{
+			"ALTER TABLE leases DROP COLUMN granted_node",
+			"DELETE FROM ignored_schema_migrations WHERE version > 13",
+		} {
+			if _, err := admin.ExecContext(ctx, stmt); err != nil {
+				t.Fatalf("%s: %v", stmt, err)
+			}
+		}
+		bd := buildBDForInitTests(t)
+		run = func(args ...string) (string, string, int) {
+			t.Helper()
+			cmd := exec.Command(bd, args...)
+			cmd.Dir = repo
+			cmd.Env = append(filteredEnvForContextBinding("BEADS_DIR", "BEADS_DB", "BD_DB",
+				"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_DATABASE", schema.AllowRemoteMigrateEnv,
+				schema.AllowMigrateEnv, "BD_IGNORE_SCHEMA_SKEW"),
+				"HOME="+t.TempDir(),
+				"XDG_CONFIG_HOME="+t.TempDir(),
+				"BEADS_TEST_MODE=1",
+				"BEADS_TEST_SERVER=1",
+				"BEADS_DIR="+beadsDir,
+				schema.AllowRemoteMigrateEnv+"=0",
+			)
+			var stdout, stderr strings.Builder
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			code := 0
+			if err := cmd.Run(); err != nil {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) {
+					t.Fatalf("running bd %v: %v", args, err)
+				}
+				code = exitErr.ExitCode()
+			}
+			return stdout.String(), stderr.String(), code
+		}
+		return repo, beadsDir, admin, run
+	}
+
+	// The #7038 fixture leaves the raw ignored cursor at 13.
+	const regressedCursor = 13
+	readCursor := func(t *testing.T, admin *sql.DB) int {
+		t.Helper()
+		var v int
+		if err := admin.QueryRowContext(context.Background(),
+			"SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations").Scan(&v); err != nil {
+			t.Fatalf("read ignored cursor: %v", err)
+		}
+		return v
+	}
+	// armBump writes the one-shot stale-version witness; it is inline rather
+	// than the staleVersionWitness helper so this test runs unchanged against
+	// a base that predates the version-bump fixtures above.
+	armBump := func(t *testing.T, beadsDir string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(beadsDir, localVersionFile), []byte("1.0.0\n"), 0o600); err != nil {
+			t.Fatalf("write stale %s: %v", localVersionFile, err)
+		}
+	}
+	witness := func(t *testing.T, beadsDir string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(beadsDir, localVersionFile))
+		if err != nil {
+			t.Fatalf("read %s: %v", localVersionFile, err)
+		}
+		return strings.TrimSpace(string(data))
+	}
+
+	t.Run("strict readonly neither migrates nor consumes the upgrade witness", func(t *testing.T) {
+		_, beadsDir, admin, run := newRegressedWorkspace("sro")
+		armBump(t, beadsDir)
+
+		stdout, stderr, code := run("list", "--readonly")
+		if code == 0 {
+			t.Fatalf("bd list --readonly succeeded on a schema its reads cannot query\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if !strings.Contains(stderr, "clone-local schema mismatch") || !strings.Contains(stderr, "bd migrate schema") {
+			t.Errorf("strict-readonly read did not get the typed clone-local refusal:\n%s", stderr)
+		}
+		if got := readCursor(t, admin); got != regressedCursor {
+			t.Errorf("strict-readonly run migrated the clone-local cursor from %d to %d; a read-only open must never migrate", regressedCursor, got)
+		}
+		if got := witness(t, beadsDir); got != "1.0.0" {
+			t.Errorf("strict-readonly run consumed the one-shot upgrade witness (%q); strict readonly is mutation-free, so the next ordinary command must still find it", got)
+		}
+	})
+
+	t.Run("a maintenance freeze neither migrates nor consumes the witness", func(t *testing.T) {
+		repo, beadsDir, admin, run := newRegressedWorkspace("sfz")
+		if err := os.WriteFile(filepath.Join(repo, migration.FileName),
+			[]byte("glm\t2026-11-09T00:00:00Z\ttest freeze\n"), 0o644); err != nil {
+			t.Fatalf("write freeze marker: %v", err)
+		}
+		armBump(t, beadsDir)
+
+		stdout, stderr, code := run("list")
+		if code == 0 {
+			t.Fatalf("bd list succeeded on a schema its reads cannot query\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if !strings.Contains(stderr, "clone-local schema mismatch") {
+			t.Errorf("a frozen read did not get the typed clone-local refusal:\n%s", stderr)
+		}
+		if got := readCursor(t, admin); got != regressedCursor {
+			t.Errorf("a frozen run migrated the clone-local cursor from %d to %d; the freeze skips the reconciliation entirely", regressedCursor, got)
+		}
+		if got := witness(t, beadsDir); got != "1.0.0" {
+			t.Errorf("a frozen run consumed the one-shot upgrade witness (%q); it must survive for the first command after the freeze lifts", got)
+		}
+	})
+
+	t.Run("a preview keeps the raw-failure policy", func(t *testing.T) {
+		_, beadsDir, admin, run := newRegressedWorkspace("spv")
+		armBump(t, beadsDir)
+
+		stdout, stderr, _ := run("migrate", "--dry-run")
+		if combined := stdout + stderr; strings.Contains(combined, "clone-local schema mismatch") {
+			t.Errorf("a preview got the typed refusal; it never asks for a readable schema and reports through its own query:\n%s", combined)
+		}
+		if got := readCursor(t, admin); got != regressedCursor {
+			t.Errorf("a preview migrated the clone-local cursor from %d to %d; dry-run must not migrate", regressedCursor, got)
+		}
+		if got := witness(t, beadsDir); got != "1.0.0" {
+			t.Errorf("a preview consumed the one-shot upgrade witness (%q); a preview detects but must not consume it", got)
+		}
+	})
 }
 
 // TestServerModeReadRefusesASchemaItsReadsCannotQuery is the other half of the
