@@ -504,6 +504,11 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
                 "assignee": "str (optional)",
                 "title": "str (optional)",
                 "description": "str (optional)",
+                "design": "str (optional)",
+                "acceptance_criteria": "str (optional)",
+                "notes": "str (optional)",
+                "external_ref": "str (optional)",
+                "labels": "list[str] (optional) - Replace all labels; empty list clears labels",
                 "brief": "bool (default true) - Return OperationResult instead of full Issue",
                 "workspace_root": "str (optional)",
             },
@@ -1224,6 +1229,7 @@ async def update_issue(
     acceptance_criteria: str | None = None,
     notes: str | None = None,
     external_ref: str | None = None,
+    labels: list[str] | None = None,
     workspace_root: str | None = None,
     brief: bool = True,
 ) -> Issue | OperationResult | list[Issue] | list[OperationResult] | None:
@@ -1252,6 +1258,7 @@ async def update_issue(
         acceptance_criteria=acceptance_criteria,
         notes=notes,
         external_ref=external_ref,
+        labels=labels,
     )
 
     if isinstance(issue, list):
