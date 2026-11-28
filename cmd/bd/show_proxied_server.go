@@ -102,7 +102,7 @@ func runShowProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 		return err
 	}
 	if in.head {
-		if err := validateShowHead(cmd, jsonOutput); err != nil {
+		if err := validateShowHead(cmd); err != nil {
 			return err
 		}
 		in.commentsTail = resolveHeadCommentsTail(cmd, in.commentsTail)
@@ -513,7 +513,13 @@ func runShowProxiedDefault(ctx context.Context, uw uow.UnitOfWork, in *showProxi
 				return HandleErrorRespectJSON("%v", derr)
 			}
 			foundCount++
-			allDetails = append(allDetails, details)
+			if in.head {
+				// The same projection the direct route makes; see
+				// show_head.go.
+				allDetails = append(allDetails, newHeadDetails(details, in.commentsTail))
+			} else {
+				allDetails = append(allDetails, details)
+			}
 			continue
 		}
 
@@ -661,5 +667,8 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 // getRequest carries the proxied show flags onto the read contract. See
 // showGetRequest: the two routes build this independently.
 func (in *showProxiedInput) getRequest(id string) issueops.GetRequest {
+	if in.head {
+		return showHeadGetRequest(id, in.includeDepends)
+	}
 	return showGetRequest(id, in.includeDepends, in.includeComments, in.briefDeps)
 }

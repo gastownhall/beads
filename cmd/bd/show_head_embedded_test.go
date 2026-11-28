@@ -26,6 +26,8 @@ func TestEmbeddedShowHead(t *testing.T) {
 			t.Fatalf("bd comments add %q failed: %v\n%s", text, err, out)
 		}
 	}
+	dep := bdCreate(t, bd, dir, showHeadDepArgs()...)
+	bdDepAdd(t, bd, dir, issue.ID, dep.ID)
 
 	t.Run("direct_head", func(t *testing.T) {
 		assertShowHead(t, "direct", bdShowRaw(t, bd, dir, issue.ID, "--head"), issue.ID, 3)
@@ -38,6 +40,32 @@ func TestEmbeddedShowHead(t *testing.T) {
 
 	t.Run("direct_full_view_untouched", func(t *testing.T) {
 		assertShowHeadOff(t, "direct", bdShowRaw(t, bd, dir, issue.ID))
+	})
+
+	t.Run("direct_head_json", func(t *testing.T) {
+		assertShowHeadJSON(t, "direct", bdShowRaw(t, bd, dir, issue.ID, "--head", "--json"), dep.ID, 3)
+	})
+
+	t.Run("direct_head_json_with_comments_tail", func(t *testing.T) {
+		assertShowHeadJSON(t, "direct --comments-tail 1", bdShowRaw(t, bd, dir, issue.ID, "--head", "--json", "--comments-tail", "1"), dep.ID, 1)
+		assertShowHeadJSON(t, "direct --comments-tail 0", bdShowRaw(t, bd, dir, issue.ID, "--head", "--json", "--comments-tail", "0"), dep.ID, 0)
+	})
+
+	t.Run("direct_full_json_untouched", func(t *testing.T) {
+		assertShowHeadJSONOff(t, "direct", bdShowDetails(t, bd, dir, issue.ID))
+	})
+
+	t.Run("direct_head_json_one_object_per_issue", func(t *testing.T) {
+		docs := showHeadJSON(t, "direct", bdShowRaw(t, bd, dir, issue.ID, dep.ID, "--head", "--json"))
+		if len(docs) != 2 {
+			t.Fatalf("%d issues in the view, want 2", len(docs))
+		}
+		// The dependency is a short issue: its description is withheld and
+		// nothing else is.
+		withheld := showHeadWithheld(t, "direct", docs[1])
+		if docs[1]["id"] != dep.ID || withheld["description_bytes"] != float64(len(showHeadDepBody)) || withheld["notes_bytes"] != float64(0) || withheld["comments"] != float64(0) {
+			t.Errorf("the second issue's head view: id=%v withheld=%v", docs[1]["id"], withheld)
+		}
 	})
 
 	t.Run("direct_short_issue_withholds_nothing", func(t *testing.T) {

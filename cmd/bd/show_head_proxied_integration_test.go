@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -16,7 +17,7 @@ import (
 // show_head_test.go pins the helpers by calling them directly, so a route
 // that never reads the flag, or reads it and still prints the four content
 // fields, would pass that file. These tests run the built binary through
-// both routes over one fat issue and read the rendered text.
+// both routes over one fat issue and read the rendered text and the JSON.
 
 const (
 	showHeadDescription = "HEAD-DESCRIPTION-MARKER"
@@ -24,7 +25,16 @@ const (
 	showHeadAcceptance  = "HEAD-ACCEPTANCE-MARKER"
 	showHeadNotesEarly  = "HEAD-NOTES-EARLY-MARKER"
 	showHeadNotesLast   = "HEAD-NOTES-LAST-MARKER"
+	// showHeadDepBody is the description of the issue the fixture depends
+	// on. A full dependency row carries it and a brief one does not.
+	showHeadDepBody = "HEAD-DEP-BODY-MARKER"
 )
+
+// showHeadDepArgs are the bd create arguments of the issue the fat fixture
+// issue depends on.
+func showHeadDepArgs() []string {
+	return []string{"Head dep", "--type", "task", "--description", showHeadDepBody}
+}
 
 // showHeadComments are the fixture's comments, oldest first. Five, so the
 // head view's default of three hides two.
@@ -92,9 +102,134 @@ func assertShowHead(t *testing.T, route, out, issueID string, shown int) {
 	}
 }
 
+// showHeadJSON parses the output of bd show --head --json: an array with one
+// object per issue, as bd show --json prints.
+func showHeadJSON(t *testing.T, route, out string) []map[string]interface{} {
+	t.Helper()
+	start := strings.Index(out, "[")
+	if start < 0 {
+		t.Fatalf("%s: no JSON array in the output:\n%s", route, out)
+	}
+	var docs []map[string]interface{}
+	if err := json.Unmarshal([]byte(out[start:]), &docs); err != nil {
+		t.Fatalf("%s: parse the JSON head view: %v\n%s", route, err, out)
+	}
+	return docs
+}
+
+// showHeadWithheld reads the withheld object of one JSON head view.
+func showHeadWithheld(t *testing.T, route string, doc map[string]interface{}) map[string]interface{} {
+	t.Helper()
+	withheld, ok := doc["withheld"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("%s: the head view has no withheld object: %v", route, doc)
+	}
+	for _, key := range []string{"description_bytes", "design_bytes", "notes_bytes", "acceptance_criteria_bytes", "comments"} {
+		if _, ok := withheld[key].(float64); !ok {
+			t.Errorf("%s: withheld lacks the number %q: %v", route, key, withheld)
+		}
+	}
+	return withheld
+}
+
+// assertShowHeadJSON checks the JSON head view of the fixture issue, as the
+// only issue in out. shown is how many of the newest comments the view was
+// asked for (0 keeps them all), and depID is the issue the fixture depends on.
+func assertShowHeadJSON(t *testing.T, route, out, depID string, shown int) {
+	t.Helper()
+	docs := showHeadJSON(t, route, out)
+	if len(docs) != 1 {
+		t.Fatalf("%s: %d issues in the view, want 1:\n%s", route, len(docs), out)
+	}
+	doc := docs[0]
+	if doc["title"] != "Head me" {
+		t.Errorf("%s: title = %v", route, doc["title"])
+	}
+	for _, key := range []string{"description", "design", "acceptance_criteria"} {
+		if _, ok := doc[key]; ok {
+			t.Errorf("%s: the head view carries %q:\n%s", route, key, out)
+		}
+	}
+	// No withheld text anywhere in the document, the dependency rows
+	// included: a full dependency row would carry that issue's description.
+	for _, text := range []string{showHeadDescription, showHeadDesign, showHeadAcceptance, showHeadNotesEarly, showHeadDepBody} {
+		if strings.Contains(out, text) {
+			t.Errorf("%s: the head view carries %q:\n%s", route, text, out)
+		}
+	}
+
+	notes, _ := doc["notes"].(string)
+	if !strings.HasSuffix(notes, showHeadNotesLast) || len(notes) > 1024 {
+		t.Errorf("%s: notes are not the last 1 KB of the field (%d bytes):\n%s", route, len(notes), notes)
+	}
+
+	hidden := 0
+	if shown > 0 && shown < len(showHeadComments) {
+		hidden = len(showHeadComments) - shown
+	}
+	var got []string
+	comments, _ := doc["comments"].([]interface{})
+	for _, c := range comments {
+		row, _ := c.(map[string]interface{})
+		text, _ := row["text"].(string)
+		got = append(got, text)
+	}
+	if want := showHeadComments[hidden:]; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("%s: comments = %v, want %v", route, got, want)
+	}
+	if doc["comment_count"] != float64(len(showHeadComments)) {
+		t.Errorf("%s: comment_count = %v, want the count of all %d", route, doc["comment_count"], len(showHeadComments))
+	}
+
+	deps, _ := doc["dependencies"].([]interface{})
+	if len(deps) != 1 {
+		t.Fatalf("%s: %d dependency rows, want 1:\n%s", route, len(deps), out)
+	}
+	if dep, _ := deps[0].(map[string]interface{}); dep["id"] != depID || dep["title"] != "Head dep" {
+		t.Errorf("%s: the dependency row lost its identity: %v", route, deps[0])
+	}
+
+	withheld := showHeadWithheld(t, route, doc)
+	want := map[string]int{
+		"description_bytes":         len(showHeadDescription),
+		"design_bytes":              len(showHeadDesign),
+		"notes_bytes":               len(showHeadNotes()) - len(notes),
+		"acceptance_criteria_bytes": len(showHeadAcceptance),
+		"comments":                  hidden,
+	}
+	for key, n := range want {
+		if withheld[key] != float64(n) {
+			t.Errorf("%s: withheld.%s = %v, want %d", route, key, withheld[key], n)
+		}
+	}
+}
+
+// assertShowHeadJSONOff checks that bd show --json without --head still
+// answers as it did: the content fields whole, the full dependency row, no
+// comment bodies and no withheld object.
+func assertShowHeadJSONOff(t *testing.T, route string, doc map[string]interface{}) {
+	t.Helper()
+	if doc["description"] != showHeadDescription || doc["design"] != showHeadDesign || doc["acceptance_criteria"] != showHeadAcceptance || doc["notes"] != showHeadNotes() {
+		t.Errorf("%s: bd show --json lost or cut a content field: %v", route, doc)
+	}
+	if _, ok := doc["withheld"]; ok {
+		t.Errorf("%s: bd show --json carries a withheld object without --head", route)
+	}
+	if _, ok := doc["comments"]; ok || doc["comments_omitted"] != true {
+		t.Errorf("%s: bd show --json reads comment bodies without --include-comments: comments_omitted=%v", route, doc["comments_omitted"])
+	}
+	deps, _ := doc["dependencies"].([]interface{})
+	if len(deps) != 1 {
+		t.Fatalf("%s: %d dependency rows, want 1", route, len(deps))
+	}
+	if dep, _ := deps[0].(map[string]interface{}); dep["description"] != showHeadDepBody {
+		t.Errorf("%s: bd show --json reduced the dependency row without --brief-deps: %v", route, deps[0])
+	}
+}
+
 // showHeadRefused are the flags --head is refused with, as a test passes
 // them; the refusal names the flag without its value.
-var showHeadRefused = []string{"--json", "--short", "--long", "--refs", "--children", "--thread", "--watch", "--as-of=main"}
+var showHeadRefused = []string{"--short", "--long", "--refs", "--children", "--thread", "--watch", "--as-of=main", "--include-comments"}
 
 // showHeadRefusal is the text the refusal of --head with other must carry.
 func showHeadRefusal(other string) string {
@@ -130,6 +265,8 @@ func TestProxiedServerShowHead(t *testing.T) {
 	for _, text := range showHeadComments {
 		bdProxiedComment(t, bd, p.dir, issue.ID, text)
 	}
+	dep := bdProxiedCreate(t, bd, p.dir, showHeadDepArgs()...)
+	bdProxiedDep(t, bd, p.dir, "add", issue.ID, dep.ID)
 
 	t.Run("proxied_head", func(t *testing.T) {
 		t.Parallel()
@@ -145,6 +282,36 @@ func TestProxiedServerShowHead(t *testing.T) {
 	t.Run("proxied_full_view_untouched", func(t *testing.T) {
 		t.Parallel()
 		assertShowHeadOff(t, "proxied", bdProxiedShowRaw(t, bd, p.dir, issue.ID))
+	})
+
+	t.Run("proxied_head_json", func(t *testing.T) {
+		t.Parallel()
+		assertShowHeadJSON(t, "proxied", bdProxiedShowRaw(t, bd, p.dir, issue.ID, "--head", "--json"), dep.ID, 3)
+	})
+
+	t.Run("proxied_head_json_with_comments_tail", func(t *testing.T) {
+		t.Parallel()
+		assertShowHeadJSON(t, "proxied --comments-tail 1", bdProxiedShowRaw(t, bd, p.dir, issue.ID, "--head", "--json", "--comments-tail", "1"), dep.ID, 1)
+		assertShowHeadJSON(t, "proxied --comments-tail 0", bdProxiedShowRaw(t, bd, p.dir, issue.ID, "--head", "--json", "--comments-tail", "0"), dep.ID, 0)
+	})
+
+	t.Run("proxied_full_json_untouched", func(t *testing.T) {
+		t.Parallel()
+		assertShowHeadJSONOff(t, "proxied", bdProxiedShowDetailsFirst(t, bd, p.dir, issue.ID))
+	})
+
+	t.Run("proxied_head_json_one_object_per_issue", func(t *testing.T) {
+		t.Parallel()
+		docs := showHeadJSON(t, "proxied", bdProxiedShowRaw(t, bd, p.dir, issue.ID, dep.ID, "--head", "--json"))
+		if len(docs) != 2 {
+			t.Fatalf("%d issues in the view, want 2", len(docs))
+		}
+		// The dependency is a short issue: its description is withheld and
+		// nothing else is.
+		withheld := showHeadWithheld(t, "proxied", docs[1])
+		if docs[1]["id"] != dep.ID || withheld["description_bytes"] != float64(len(showHeadDepBody)) || withheld["notes_bytes"] != float64(0) || withheld["comments"] != float64(0) {
+			t.Errorf("the second issue's head view: id=%v withheld=%v", docs[1]["id"], withheld)
+		}
 	})
 
 	t.Run("proxied_short_issue_withholds_nothing", func(t *testing.T) {
