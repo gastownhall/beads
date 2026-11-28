@@ -13,6 +13,7 @@
     },
     "owner": "test@protocol.test",
     "priority": 0,
+    "revision": "<REVISION>",
     "status": "open",
     "title": "Corpus root issue",
     "updated_at": "<TS>"

@@ -41,7 +41,7 @@ Flags:
   -h, --help                         help for update
       --history                      Clear no-history flag (re-enable Dolt commit history)
       --if-assignee string           Apply the update only if the current assignee equals this value (--if-assignee '' requires unassigned); a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim
-      --if-revision bd show --json   Apply the write only if the issue's current revision equals this value (the decimal int64 from bd show --json's "revision" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures). Composes with --if-assignee/--if-status: all guards present must hold.
+      --if-revision bd show --json   Apply the write only if the issue's current revision equals this value (the decimal int64 from the "revision" field of bd show --json, or of the row a previous `bd update --json` printed). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures). Composes with --if-assignee/--if-status: all guards present must hold.
       --if-status string             Apply the update only if the current status equals this value; a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim
       --metadata string              Set custom metadata (JSON object, or @file.json to read from file)
       --no-history                   Mark issue as no-history (skip Dolt commits, not GC-eligible)
