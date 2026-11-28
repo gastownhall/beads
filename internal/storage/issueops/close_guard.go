@@ -76,7 +76,7 @@ func CheckClosable(id string, issue *types.Issue, actor string, force bool) erro
 	if issue.Pinned || issue.Status == types.StatusPinned {
 		return &publicops.PinnedError{IssueID: id}
 	}
-	if issue.Assignee != "" && !actorMatches(issue.Assignee, actor) {
+	if issue.Assignee != "" && !actorMatchesFold(issue.Assignee, actor) {
 		return &publicops.CloseNotAssigneeError{IssueID: id, Assignee: issue.Assignee, Actor: actor}
 	}
 	return nil

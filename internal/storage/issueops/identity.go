@@ -83,6 +83,15 @@ func actorMatches(a, b string) bool {
 	return a == b || canonicalActor(a) == canonicalActor(b)
 }
 
+// actorMatchesFold is actorMatches plus case-insensitivity on the canonical
+// form (beads #8628). Used only on the ownership checks for bd close and the
+// --if-assignee CAS, so a case-only difference between the stored assignee and
+// the acting identity no longer refuses the close. Claim, unclaim, heartbeat and
+// the exported ActorMatches keep exact-separator matching.
+func actorMatchesFold(a, b string) bool {
+	return actorMatches(a, b) || strings.EqualFold(canonicalActor(a), canonicalActor(b))
+}
+
 // ActorMatches is the exported form of actorMatches. Exported for the
 // proxied-server (uow) claim path in internal/storage/domain/db (ga-v2k49),
 // which builds its own claim UPDATE rather than calling ClaimIssueInTx —
