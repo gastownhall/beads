@@ -215,6 +215,7 @@ go_library(
         "label_proxied_server.go",
         "label_whitespace_warn.go",
         "last_touched.go",
+        "lease_ttl_flag.go",
         "legacy_sqlite_reader.go",
         "legacy_upgrade_guard.go",
         "linear.go",
@@ -1014,6 +1015,8 @@ go_test(
         "last_touched_guard_test.go",
         "last_touched_readonly_test.go",
         "last_touched_test.go",
+        "lease_ttl_flag_store_test.go",
+        "lease_ttl_flag_test.go",
         "legacy_upgrade_guard_config_yaml_test.go",
         "legacy_upgrade_guard_e2e_test.go",
         "legacy_upgrade_guard_empty_root_test.go",
@@ -1971,7 +1974,10 @@ exports_files(
 # //internal/httpclient/encode:encode_test's crossPackagePins registry
 # (internal/httpclient/encode/ledger_pins_test.go).
 exports_files(
-    ["serve_test.go"],
+    [
+        "lease_ttl_flag_test.go",
+        "serve_test.go",
+    ],
     visibility = ["//internal/httpclient/encode:__pkg__"],
 )
 

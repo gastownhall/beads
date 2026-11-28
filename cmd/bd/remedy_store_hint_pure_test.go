@@ -25,7 +25,8 @@ import (
 // through remedy.CommandArg: bd find-duplicates'
 // Compare line, bd mol ready --gated's bd assign line, bd show's
 // comments-tail and raw-edge pointers, bd dep list's raw-edge pointer, bd dep
-// add's malformed-target refusal and bd close's unserved auto-close note. Each reads an issue ID from the store,
+// add's malformed-target refusal, bd close's unserved auto-close note and the
+// re-claim warning of bd update --claim --ttl. Each reads an issue ID from the store,
 // which holds a collaborator's issues after bd dolt pull. An ID holding shell
 // syntax goes into the suggested command single-quoted on POSIX, and one no
 // quoting passes on (a carriage return and terminal escape) takes a
@@ -122,6 +123,13 @@ func TestStoreReadCommandHintsQuoteIDs(t *testing.T) {
 				noticeUnservedMoleculeAutoClose(context.Background(), s, "bd-step", nil)
 			})
 			return out, bdLine(t, out, "bd close")
+		}},
+		{"bd update --claim --ttl re-claim warning", "bd heartbeat", func(t *testing.T, id string) (string, string) {
+			held := &types.Issue{ID: id, Status: types.StatusInProgress, Assignee: "agent"}
+			out := captureStderr(t, func() {
+				warnLeaseTTLNotApplied(id, held, "agent", time.Hour)
+			})
+			return out, bdLine(t, out, "bd heartbeat")
 		}},
 	}
 

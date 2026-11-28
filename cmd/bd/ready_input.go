@@ -2,6 +2,7 @@ package main
 
 import (
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -34,6 +35,10 @@ type readyInput struct {
 	prettyFormat bool
 	plainFormat  bool
 	jsonOut      bool
+
+	// leaseTTL is --ttl, the lease length a --claim arms; 0 keeps the store's
+	// default. readyCmd's RunE validates it above the route dispatch.
+	leaseTTL time.Duration
 }
 
 // gatherReadyInput parses `bd ready`'s flags and builds the work filter. Both
@@ -57,6 +62,7 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 	in := readyInput{}
 
 	in.claim, _ = cmd.Flags().GetBool("claim")
+	in.leaseTTL, _ = cmd.Flags().GetDuration(leaseTTLFlagName)
 	in.gated, _ = cmd.Flags().GetBool("gated")
 	in.molID, _ = cmd.Flags().GetString("mol")
 	in.explain, _ = cmd.Flags().GetBool("explain")

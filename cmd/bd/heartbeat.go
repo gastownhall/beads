@@ -33,9 +33,15 @@ and committed, once. Leases are only enforceable on the node that granted them;
 cross-machine claim visibility rides the issue's status and assignee, which do
 commit.
 
+A heartbeat sets the expiry to now plus the lease length it is given: --ttl, or
+the default without it. The length is per call, so a worker that claimed with
+--ttl 2h passes --ttl 2h on every heartbeat; a heartbeat without it cuts the
+lease back to the default.
+
 Examples:
   bd heartbeat bd-123
-  bd hb bd-123`,
+  bd hb bd-123
+  bd heartbeat --ttl 2h bd-123`,
 	Args:          cobra.ExactArgs(1),
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -49,7 +55,13 @@ Examples:
 			}
 		}()
 
-		ctx := rootCtx
+		// --ttl rides the context into the lease code on every route that runs
+		// it in this process; the remote bd serve route refuses it below.
+		leaseTTL, err := leaseTTLFromFlags(cmd, "", false)
+		if err != nil {
+			return err
+		}
+		ctx := withLeaseTTL(rootCtx, leaseTTL)
 		id := args[0]
 
 		// One role on every route: the store's own
@@ -79,6 +91,9 @@ Examples:
 		defer result.Close()
 
 		issueStore := result.Store
+		if err := leaseTTLRemoteRefusal(issueStore, leaseTTL, "heartbeat"); err != nil {
+			return HandleErrorRespectJSON("heartbeat %s: %v", result.ResolvedID, err)
+		}
 		heartbeater, err := issueStore.Heartbeater()
 		if err != nil {
 			return HandleErrorRespectJSON("heartbeat %s: %v", result.ResolvedID, err)
@@ -121,5 +136,6 @@ func renderHeartbeatSuccess(id, title string) error {
 
 func init() {
 	heartbeatCmd.ValidArgsFunction = issueIDCompletion
+	addLeaseTTLFlag(heartbeatCmd, heartbeatLeaseTTLUsage)
 	rootCmd.AddCommand(heartbeatCmd)
 }
