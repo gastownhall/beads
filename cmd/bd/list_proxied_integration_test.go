@@ -84,6 +84,60 @@ func TestProxiedServerList(t *testing.T) {
 		}
 	})
 
+	t.Run("pagination_envelope_truncated", func(t *testing.T) {
+		// GH#5444: under BD_JSON_ENVELOPE=1 a --limit-cut page carries the
+		// truncation verdict in-band on this backend too — the stderr hint is
+		// terminal-gated and unreachable in a pipe. Mirrors the direct
+		// route's limit_truncation_json_envelope pin in
+		// TestEmbeddedListFilteringBasicAndLabels.
+		run := func(args ...string) map[string]json.RawMessage {
+			fullArgs := append([]string{"list", "--json"}, args...)
+			stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir,
+				[]string{"BD_JSON_ENVELOPE=1"}, fullArgs...)
+			if err != nil {
+				t.Fatalf("bd list --json %s failed: %v\nstdout:\n%s\nstderr:\n%s",
+					strings.Join(args, " "), err, stdout, stderr)
+			}
+			s := strings.TrimSpace(stdout)
+			start := strings.Index(s, "{")
+			if start < 0 {
+				t.Fatalf("no JSON envelope object in stdout: %s", stdout)
+			}
+			var env map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(s[start:]), &env); err != nil {
+				t.Fatalf("parse envelope JSON: %v\n%s", err, s[start:])
+			}
+			return env
+		}
+
+		env := run("--all", "--limit", "2")
+		rawPag, ok := env["pagination"]
+		if !ok {
+			t.Fatalf("truncated page carried no pagination key: %v", env)
+		}
+		var pagFields map[string]json.RawMessage
+		if err := json.Unmarshal(rawPag, &pagFields); err != nil {
+			t.Fatalf("pagination is not an object: %s", rawPag)
+		}
+		if _, has := pagFields["total"]; has {
+			t.Errorf("pagination carries a total key (%s); no list-plane count exists, so it must stay omitted", pagFields["total"])
+		}
+		var pag PaginationMeta
+		if err := json.Unmarshal(rawPag, &pag); err != nil {
+			t.Fatalf("unmarshal pagination: %v", err)
+		}
+		if !pag.Truncated || pag.Returned != 2 {
+			t.Errorf("pagination = %+v, want returned=2 truncated", pag)
+		}
+
+		// An untruncated page carries no pagination key at all — the direct
+		// route's contract, and bd ready's.
+		env = run("--all", "--limit", "0")
+		if _, ok := env["pagination"]; ok {
+			t.Errorf("unexpected pagination key on an untruncated page: %s", env["pagination"])
+		}
+	})
+
 	t.Run("id_filter", func(t *testing.T) {
 		idList := seed.openBug + "," + seed.readyTask
 		issues := bdProxiedListJSON(t, bd, p, "--id", idList)
