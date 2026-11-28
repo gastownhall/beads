@@ -1482,7 +1482,7 @@ bd db-proxy-child
   flag --external-keep-alive type=duration default="0s" usage="external backend: TCP keepalive period (default 30s)"
   flag --external-port type=int default="0" usage="external backend: TCP port of the dolt sql-server"
   flag --external-socket-path type=string default="" usage="external backend: absolute path to a unix domain socket (overrides host/port)"
-  flag --idle-timeout type=duration default="0s" usage="idle timeout before shutdown (0 or negative = never shut down)"
+  flag --idle-timeout type=duration default="0s" usage="idle timeout before shutdown; the parent proxy resolves an omitted value to 30s before ever invoking this flag (see bd init --proxied-server-idle-timeout), 0 or negative = never shut down"
   flag --logpath type=string default="" usage="path the backend server should write its stdout/stderr to"
   flag --port type=int default="0" annotations={cobra_annotation_bash_completion_one_required_flag=["true"]} usage="port to listen on"
   flag --root type=string default="" annotations={cobra_annotation_bash_completion_one_required_flag=["true"]} usage="root directory holding proxy.lock, proxy.pid, proxy.log"

@@ -219,10 +219,16 @@ func TestInitCommandRejectsOptionSyncRemoteBeforeWrites(t *testing.T) {
 }
 
 func TestBuildProxiedServerClientInfo(t *testing.T) {
-	t.Run("all empty returns nil", func(t *testing.T) {
+	t.Run("all empty still persists an explicit 30s idle-timeout default", func(t *testing.T) {
 		info, err := buildProxiedServerClientInfo("", "", "", 0, 0, nil)
 		require.NoError(t, err)
-		assert.Nil(t, info)
+		require.NotNil(t, info, "a fully-default proxied-server init must still persist a sidecar (AC1)")
+		assert.Equal(t, 30*time.Second, info.IdleTimeout, "an omitted idle-timeout must resolve to the explicit 30s default, not stay zero-valued")
+		assert.Empty(t, info.RootPath)
+		assert.Empty(t, info.ConfigPath)
+		assert.Empty(t, info.LogPath)
+		assert.Zero(t, info.Port)
+		assert.Nil(t, info.External)
 	})
 
 	t.Run("port alone is persisted", func(t *testing.T) {
@@ -230,7 +236,7 @@ func TestBuildProxiedServerClientInfo(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, info)
 		assert.Equal(t, 3306, info.Port)
-		assert.Zero(t, info.IdleTimeout)
+		assert.Equal(t, 30*time.Second, info.IdleTimeout, "an omitted idle-timeout defaults to 30s even when another field is explicit")
 	})
 
 	t.Run("idle timeout alone is persisted", func(t *testing.T) {
