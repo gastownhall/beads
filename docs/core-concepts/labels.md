@@ -273,6 +273,54 @@ bd list --label backend --label-any urgent,release-blocker
 bd list --label needs-review,needs-tests --label-any frontend,ui,mobile
 ```
 
+### Execution-context requirements (`requires:` labels and `--ctx`)
+
+Some work can only be done from a particular place: a box with the GPU, a
+machine that holds production credentials, a macOS host. Beads states that
+on the issue as an ordinary label under the reserved `requires:` namespace,
+and lets a reader declare what it has with `--ctx`:
+
+```bash
+# The issue side: one label per requirement, bare or keyed
+bd create "Rebuild the shader cache" --labels requires:gpu
+bd create "Rotate the prod certificate" --labels requires:prod-creds,requires:host=studio
+
+# The reader side: declare your context, and only work you can run is shown
+bd ready --ctx gpu
+bd ready --ctx host=studio,prod-creds
+bd ready --ctx-file ~/.config/beads/ctx          # one token per line, # comments allowed
+bd ready --ctx-file ~/.config/beads/ctx --claim  # claim only what you can run
+bd list --ready --ctx gpu
+bd blocked --ctx gpu
+```
+
+The rules:
+
+- A reader that declares **nothing** sees every row, exactly as before. The
+  predicate is off unless `--ctx` or `--ctx-file` is given.
+- A reader that declares a context, **even an empty one** (`--ctx ''`), is
+  hidden every issue carrying a `requires:` label its context does not
+  satisfy. An issue with several requirements needs **all** of them met.
+- A bare requirement `requires:gpu` is satisfied by a declared `gpu` **or**
+  by any declared `gpu=<value>`. A keyed requirement `requires:host=studio`
+  is satisfied only by that exact `host=studio`.
+- Labels outside the `requires:` namespace are not requirements and are
+  never consulted by `--ctx`; combine with `--label`, `--label-any` and the
+  rest as usual.
+
+This is a label convention with a read-side filter, not a new field: nothing
+changes in storage, JSONL, sync, export/import or the wire, and a client that
+does not know the convention simply sees the rows (today's behavior). It is
+the one shape the other label filters cannot express — "hide any issue whose
+`requires:` tokens are not in my set" needs the full value universe for
+`--exclude-label`, and a negative match `--label-regex` (RE2) cannot write.
+
+`--ctx` is refused on the `bd ready` arms that do not run the ready query
+(`--gated`, `--mol`, `--explain`) and with `bd list --skip-labels`, rather
+than accepted and ignored. Under `--proxied-server` it is refused until the
+server publishes a `ctx` parameter (the HTTP client never drops a filter
+silently; see the divergence ledger).
+
 ## Workflow Examples
 
 ### Triage Workflow

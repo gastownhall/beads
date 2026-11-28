@@ -345,6 +345,72 @@ func runBlockedDoesNotMutateTheRequest(t *testing.T, ctx context.Context, f Bloc
 	}
 }
 
+// RunBlockedListerCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy pins
+// BlockedRequest.Ctx (blockedlister.go): nil lists every blocked row; a
+// declared context, even an empty one, hides every blocked row carrying a
+// `requires:` label the context does not satisfy, on both planes, so the
+// listing names only work the caller could run once unblocked. A bare
+// `requires:k` is met by `k` or any `k=<v>`; a keyed `requires:k=v` only by
+// that exact token.
+//
+// It is its own entrypoint rather than a subtest of RunBlockedLister so a leg
+// that refuses the member by design (the served client, ledger row
+// E-BlockedRequest.Ctx) can park it at its wiring site while the rest of the
+// blocked contract runs there. Every row here, the blockers included, carries
+// the case's label, so a leg that dropped the predicate answers every arm with
+// all four blocked rows.
+func RunBlockedListerCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy(t *testing.T, ctx context.Context, f BlockedListerFixture) {
+	label := f.IssuePrefix + "-bl-ctx"
+	bareReq := types.RequiresLabelPrefix + "gpu"
+	keyedReq := types.RequiresLabelPrefix + "host=studio"
+	free, bare, keyed, wisp := blListerID(f, "ctx-free"), blListerID(f, "ctx-bare"), blListerID(f, "ctx-keyed"), blListerID(f, "ctx-wisp")
+	blocker, wispBlocker := blListerID(f, "ctx-blocker"), blListerID(f, "ctx-wisp-blocker")
+	blListerSeedIssue(t, ctx, f, blListerIssue(free, 1, label))
+	blListerSeedIssue(t, ctx, f, blListerIssue(bare, 1, label, bareReq))
+	blListerSeedIssue(t, ctx, f, blListerIssue(keyed, 1, label, keyedReq))
+	blListerSeedIssue(t, ctx, f, blListerIssue(blocker, 1, label))
+	for _, id := range []string{free, bare, keyed} {
+		blListerSeedEdge(t, ctx, f, id, blocker, types.DepBlocks)
+	}
+	// The predicate is spelled once per plane's label table, so the wisp
+	// plane carries a requiring row of its own.
+	for _, w := range []*types.Issue{blListerIssue(wisp, 1, label, bareReq), blListerIssue(wispBlocker, 1, label)} {
+		w.Ephemeral = true
+		if err := f.CreateWisp(ctx, w, "seed"); err != nil {
+			t.Fatalf("seed wisp %s: %v", w.ID, err)
+		}
+	}
+	blListerSeedEdge(t, ctx, f, wisp, wispBlocker, types.DepBlocks)
+
+	want := func(ids ...string) map[string][]string {
+		m := map[string][]string{}
+		for _, id := range ids {
+			m[id] = []string{blocker}
+			if id == wisp {
+				m[id] = []string{wispBlocker}
+			}
+		}
+		return m
+	}
+	for _, arm := range []struct {
+		name string
+		ctx  []string
+		want map[string][]string
+	}{
+		{"no context declared: the predicate is off", nil, want(free, bare, keyed, wisp)},
+		{"a declared empty context meets no requirement", []string{}, want(free)},
+		{"a bare token meets the bare requirement on both planes", []string{"gpu"}, want(free, bare, wisp)},
+		{"a keyed token meets the bare requirement on its key", []string{"gpu=a100"}, want(free, bare, wisp)},
+		{"the exact keyed token meets the keyed requirement", []string{" host=studio "}, want(free, keyed)},
+		{"a bare key does not meet a keyed requirement", []string{"host"}, want(free)},
+		{"every requirement met lists every row", []string{"gpu", "host=studio"}, want(free, bare, keyed, wisp)},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			blListerAssertRows(t, blListerList(t, ctx, f, publicops.BlockedRequest{Labels: []string{label}, Ctx: arm.ctx}), arm.want)
+		})
+	}
+}
+
 func blListerID(f BlockedListerFixture, name string) string {
 	return fmt.Sprintf("%s-%s", f.IssuePrefix, name)
 }

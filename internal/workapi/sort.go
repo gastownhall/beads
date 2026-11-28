@@ -55,6 +55,7 @@ func ReadyFilterFromIssueFilter(filter types.IssueFilter) types.WorkFilter {
 		ExcludeLabels:  filter.ExcludeLabels,
 		LabelPattern:   filter.LabelPattern,
 		LabelRegex:     filter.LabelRegex,
+		Ctx:            filter.Ctx,
 		ParentID:       filter.ParentID,
 		MolType:        filter.MolType,
 		WispType:       filter.WispType,

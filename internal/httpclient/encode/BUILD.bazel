@@ -26,6 +26,7 @@ go_test(
     name = "encode_test",
     srcs = [
         "bijection_test.go",
+        "declared_test.go",
         "ledger_pins_test.go",
         "ledger_render_test.go",
         "list_filters_test.go",
@@ -42,6 +43,7 @@ go_test(
         "//:engdocs/design/http-divergence-ledger.md",
         "//cmd/bd:serve_test.go",
         "//internal/httpapi/spec:openapi.v0.yaml",
+        "//internal/httpclient:blockedlister_test.go",
         "//internal/httpclient:bulk_roles_test.go",
         "//internal/httpclient:gate_fields_test.go",
     ] + glob(["*.go"]),

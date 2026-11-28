@@ -20,7 +20,7 @@ func TestBlockedListerContract(t *testing.T) {
 		t.Fatalf("BlockedLister(): %v", err)
 	}
 	kit := newDoltRoleFixtureKit(store, "blk")
-	conformance.RunBlockedLister(t, ctx, conformance.BlockedListerFixture{
+	fixture := conformance.BlockedListerFixture{
 		IssuePrefix:   kit.IssuePrefix,
 		BlockedLister: lister,
 		CreateIssue:   kit.CreateIssue,
@@ -36,5 +36,9 @@ func TestBlockedListerContract(t *testing.T) {
 			}
 			return nil
 		},
+	}
+	conformance.RunBlockedLister(t, ctx, fixture)
+	t.Run("CtxHidesTheRowsTheDeclaredContextDoesNotSatisfy", func(t *testing.T) {
+		conformance.RunBlockedListerCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy(t, ctx, fixture)
 	})
 }

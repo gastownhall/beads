@@ -50,6 +50,7 @@ type crossPackagePin struct {
 // encode_test's data.
 var crossPackagePins = []crossPackagePin{
 	{Test: "TestOnlyOneShotCommandsMemoizeRemoteReads", File: "cmd/bd/serve_test.go"},
+	{Test: "TestBlockedWithADeclaredContextRefusesBeforeTheDial", File: "internal/httpclient/blockedlister_test.go"},
 	{Test: "TestDeleteCascadeRefusesAServerWithoutContainmentCascade", File: "internal/httpclient/bulk_roles_test.go"},
 	{Test: "TestSweepRefusesTheS4MembersWhenTheServerLacksTheCapability", File: "internal/httpclient/bulk_roles_test.go"},
 	{Test: "TestSweepSendsTheS4MembersOnceTheServerAdvertisesThem", File: "internal/httpclient/bulk_roles_test.go"},

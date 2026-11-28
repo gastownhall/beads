@@ -271,6 +271,18 @@ func TestEmbeddedReaderReadyBriefDropsTheFreeFormTextAndNothingElse(t *testing.T
 	conformance.RunReaderReadyBriefDropsTheFreeFormTextAndNothingElse(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
 }
 
+func TestEmbeddedReaderReadyCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReaderReadyCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+}
+
+func TestEmbeddedReaderListCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReaderListCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+}
+
 // newEmbeddedReaderFixture composes the shared role kit with the reader
 // accessor. One environment per case: newTestEnv clones a pristine template
 // into the test's own temp dir, which costs a fraction of a second once the

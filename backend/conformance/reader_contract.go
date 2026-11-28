@@ -3497,6 +3497,122 @@ func RunReaderListFilterFamiliesNarrowToTheirRows(t *testing.T, ctx context.Cont
 	}
 }
 
+// RunReaderReadyCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy pins
+// ReadyRequest.Ctx (reader.go, types.RequiresSatisfiedLabels): a nil context
+// leaves the ready set as it was; a declared one, even an empty one, hides
+// every row carrying a `requires:` label the context does not satisfy. A bare
+// `requires:k` is met by `k` or by any `k=<v>`, a keyed `requires:k=v` only by
+// that exact token, a row with several requirements needs all of them, and a
+// label outside the namespace is never a requirement.
+//
+// The arms are readerCtxArms, shared with the List case, so the two doors are
+// held to one rule. Each arm hides a different subset of the same five rows,
+// so a body that dropped the predicate answers every arm with all five, and
+// one that read nil and empty alike fails either the nil arm or the empty one.
+func RunReaderReadyCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	rows := seedReaderCtxRows(t, ctx, fixture, "rdyctx")
+	for _, arm := range readerCtxArms(rows) {
+		page, err := fixture.Reader.Ready(ctx, publicops.ReadyRequest{Labels: []string{rows.scope}, Ctx: arm.ctx})
+		if err != nil {
+			t.Errorf("Ready (%s): %v", arm.name, err)
+			continue
+		}
+		assertReaderPageIDSet(t, "Ready ("+arm.name+")", page, arm.want)
+	}
+}
+
+// RunReaderListCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy pins
+// ListRequest.Ctx on both arms of List: the plain listing, scoped by id, and
+// the --ready arm, scoped by label, which the doc says carries Ctx onto the
+// blocker-aware query (reader.go, ListRequest.Ctx). The rule and the arms are
+// RunReaderReadyCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy's.
+func RunReaderListCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	rows := seedReaderCtxRows(t, ctx, fixture, "lsctx")
+	for _, arm := range readerCtxArms(rows) {
+		page, err := fixture.Reader.List(ctx, publicops.ListRequest{IDFilter: readerIDFilter(rows.all()...), Ctx: arm.ctx})
+		if err != nil {
+			t.Errorf("List (%s): %v", arm.name, err)
+		} else {
+			assertReaderPageIDSet(t, "List ("+arm.name+")", page, arm.want)
+		}
+
+		page, err = fixture.Reader.List(ctx, publicops.ListRequest{Labels: []string{rows.scope}, ReadyFlag: true, Ctx: arm.ctx})
+		if err != nil {
+			t.Errorf("List --ready (%s): %v", arm.name, err)
+			continue
+		}
+		assertReaderPageIDSet(t, "List --ready ("+arm.name+")", page, arm.want)
+	}
+}
+
+// readerCtxRows are the five rows the Ctx cases seed, every one an open,
+// ready task carrying the case's scope label: one with no requirement, one
+// with a lookalike label outside the `requires:` namespace, one with a bare
+// requirement, one with a keyed requirement, and one with both.
+type readerCtxRows struct {
+	scope                                   string
+	free, lookalike, bare, keyed, needsBoth string
+}
+
+func (r readerCtxRows) all() []string {
+	return []string{r.free, r.lookalike, r.bare, r.keyed, r.needsBoth}
+}
+
+func seedReaderCtxRows(t *testing.T, ctx context.Context, fixture ReaderFixture, caseTag string) readerCtxRows {
+	t.Helper()
+	rows := readerCtxRows{
+		scope:     readerLabel(fixture, caseTag),
+		free:      readerID(fixture, caseTag, "free"),
+		lookalike: readerID(fixture, caseTag, "lookalike"),
+		bare:      readerID(fixture, caseTag, "bare"),
+		keyed:     readerID(fixture, caseTag, "keyed"),
+		needsBoth: readerID(fixture, caseTag, "both"),
+	}
+	for _, seed := range []struct {
+		id     string
+		labels []string
+	}{
+		{rows.free, nil},
+		{rows.lookalike, []string{"requires-gpu"}},
+		{rows.bare, []string{types.RequiresLabelPrefix + "gpu"}},
+		{rows.keyed, []string{types.RequiresLabelPrefix + "host=studio"}},
+		{rows.needsBoth, []string{types.RequiresLabelPrefix + "gpu", types.RequiresLabelPrefix + "host=studio"}},
+	} {
+		issue := readerIssue(seed.id, types.TypeTask, rows.scope)
+		issue.Labels = append(issue.Labels, seed.labels...)
+		seedReaderIssue(t, ctx, fixture, issue)
+	}
+	return rows
+}
+
+// readerCtxArms is the declared-context table both Reader Ctx cases run. The
+// expected sets are written out rather than derived from the satisfaction
+// rule, so a rule that drifted in types.RequiresSatisfiedLabels fails here too.
+func readerCtxArms(r readerCtxRows) []struct {
+	name string
+	ctx  []string
+	want []string
+} {
+	return []struct {
+		name string
+		ctx  []string
+		want []string
+	}{
+		{"no context declared: the predicate is off", nil, r.all()},
+		{"a declared empty context meets no requirement", []string{}, []string{r.free, r.lookalike}},
+		{"blank tokens alone are a declared empty context", []string{"", "  "}, []string{r.free, r.lookalike}},
+		{"a bare token meets the bare requirement", []string{"gpu"}, []string{r.free, r.lookalike, r.bare}},
+		{"a keyed token meets the bare requirement on its key", []string{"gpu=a100"}, []string{r.free, r.lookalike, r.bare}},
+		{"tokens are trimmed", []string{" gpu "}, []string{r.free, r.lookalike, r.bare}},
+		{"the exact keyed token meets the keyed requirement", []string{"host=studio"}, []string{r.free, r.lookalike, r.keyed}},
+		{"a bare key does not meet a keyed requirement", []string{"host"}, []string{r.free, r.lookalike}},
+		{"another value does not meet a keyed requirement", []string{"host=laptop", "gpu"}, []string{r.free, r.lookalike, r.bare}},
+		{"every requirement met shows every row", []string{"gpu", "host=studio"}, r.all()},
+	}
+}
+
 // sortedCopy returns its arguments as a sorted slice.
 func sortedCopy(ids ...string) []string {
 	out := slices.Clone(ids)

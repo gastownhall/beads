@@ -390,6 +390,7 @@ sh_test(
 # (internal/httpclient/encode/ledger_pins_test.go).
 exports_files(
     [
+        "blockedlister_test.go",
         "bulk_roles_test.go",
         "gate_fields_test.go",
     ],
