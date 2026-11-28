@@ -1568,6 +1568,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no time. It now reads `Lease: expired 3 hours ago`; a live lease still reads
   `Lease: expires in 3 mins`.
 
+- **A schema migration step left uncommitted by an interrupted pass no longer
+  wedges the store.** Each numbered migration commits as it applies, but a
+  process killed after a step's SQL and cursor row and before that step's
+  commit (a crash, a kill, or an open's timeout expiring mid-step) left the
+  step in the working set. The next open refused it as "pending schema
+  migrations alter pre-existing dirty tables" until the user ran
+  `bd dolt commit`; when no later migration touched the step's tables, the
+  next pass instead committed the step's cursor row without its schema
+  change. The next migration pass (`bd migrate schema`, or any run with
+  migration consent) now recognizes one of bd's own stranded steps (its
+  cursor row is the only one missing from HEAD, it is the next version after
+  HEAD's, and its content hash matches the migration file), commits it under
+  its own message with the tables the step changed, logs one line naming it,
+  counts it in the migrations applied, and carries on. The step's tables are
+  the ones its SQL writes, `dolt_schemas` when it rewrites a view, the
+  targets of its multi-table DELETEs, and the tables its row deletes reach
+  through ON DELETE foreign keys, so a stranded 0035 or view step commits
+  whole, as an uninterrupted pass commits it. Other uncommitted tables stay
+  uncommitted and go to the usual check, which refuses only when a pending
+  migration touches one of them. An uncommitted write that landed in one of
+  the step's own tables after the kill cannot be told apart from the step's
+  change, so it is committed with the step. Still refused as before: a step
+  stranded in the first migration of an upgrade from a bd older than 1.1.0,
+  whose HEAD records no migration content hashes to compare with. A stranded
+  step that is the latest migration, on a store with nothing else to
+  migrate, starts no pass and is still left for a later commit to carry.
+  (builds on PR #8603 by bee-ghosttrack)
+
 - **`bd gc` and `bd doctor --fix` no longer skip a delete that collides with
   a concurrent write.** On a Dolt sql-server, deleting an issue while another
   client commits a write to that same issue loses Dolt's commit-time merge:

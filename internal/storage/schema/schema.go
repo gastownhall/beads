@@ -681,6 +681,14 @@ var versionGatedDoltIgnorePatterns = []struct {
 	{"events", 62}, // 0062_events_dolt_ignore (bd-red8u)
 }
 
+// DoltIgnoreSeedPatternsForTest returns a copy of the canonical dolt_ignore
+// patterns MigrateUp seeds at every open (the version-gated ones excluded).
+// Test-only: fixtures built with MigrateUpTo, which seeds nothing, commit
+// these so a later MigrateUp makes no seed commit of its own.
+func DoltIgnoreSeedPatternsForTest() []string {
+	return slices.Clone(doltIgnorePatterns)
+}
+
 // doltIgnoreSeedCandidates is the pattern set this open should assert: the
 // canonical patterns plus any version-gated pattern the main cursor
 // qualifies. The cursor table may not exist yet (first-ever run, before
@@ -1084,6 +1092,30 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 		if err := commitSeededDoltIgnore(ctx, db); err != nil {
 			return 0, err
 		}
+	}
+	// A pass killed between a step's cursor row and its commitMigrationStep
+	// left that one step in the working set. Finish it with the commit it
+	// missed before anything below reads the dirty set, so the guard, the
+	// changed-signature check and the final stageSchemaTables see only the
+	// dirt that is left. It runs after the unstage above (a kill inside the
+	// dead pass's DOLT_ADD..DOLT_COMMIT left tables staged; the unstage turns
+	// that back into a plain strand) and after the seed commit (which must
+	// precede every step commit, #4566). It runs before the aux-rekey
+	// exemption below on purpose: on a lineage below main 51 or 61 that
+	// exemption drops events, comments and the snapshot tables from
+	// dirtyBefore, but a step that changes one of them as its own work (0049
+	// alters comments) needs that change in its commit, as an uninterrupted
+	// pass makes it. finishStrandedMainStep reads its own dirty set.
+	_, cursorDirty := dirtyBeforeAll[mainSource.cursorTable]
+	finished, err := finishStrandedMainStep(ctx, db, cursorDirty)
+	if err != nil {
+		return 0, err
+	}
+	if finished {
+		// The finished step moved HEAD like any step this pass commits, so it
+		// counts in applied on every return from here, an error return
+		// included: a guard refusal after the finish still reports it.
+		defer func() { applied++ }()
 	}
 	dirtyBefore, err := committableDirtyTables(ctx, db)
 	if err != nil {
@@ -2328,11 +2360,14 @@ func (m migrationSource) migrate(ctx context.Context, db DBConn, upTo int) (int,
 // as it applies (see commitMigrationStep): its ALTERs and cursor row land in a
 // Dolt commit before the next migration runs, so a crash/kill/timeout anywhere
 // in MigrateUp's later backfill/rekey/ignored tail cannot strand this pass's
-// applied migrations uncommitted for a retry to trip over (#4566). A residual
-// window remains within a single step: a kill between a migration's SQL and
-// its commitMigrationStep still leaves that one step's debris in the working
-// set for the dirty-table guard to refuse. The window shrinks from the whole
-// pass tail to one step; it does not close entirely.
+// applied migrations uncommitted for a retry to trip over (#4566). A kill
+// inside a single step still leaves that step's work in the working set. When
+// the kill came after the step's cursor row, the next MigrateUp that runs a
+// pass recognizes the step (strandedMainStep) and commits it under its own
+// message (finishStrandedMainStep) before the dirty-table guard runs. A kill
+// before the cursor row leaves a body of unknown completeness, which still
+// reaches the guard. A stranded step that is the series' latest, with nothing
+// else pending, starts no pass and stays uncommitted (a known limit).
 //
 // An error returned while a numbered step is selected, from its snapshots,
 // pre-repair, body, updated_at restore, cursor row or step commit, that carries
@@ -2505,9 +2540,13 @@ func SetMigrateStepFaultHookForTest(fn func(ctx context.Context, db DBConn, vers
 // not touch stay in the working set, and tolerates "nothing to commit" for a
 // migration whose SQL was an idempotent no-op.
 //
-// MigrateUp's pre-flight guard proves no table a pending migration touches
-// holds uncommitted user rows before the pass runs, so every table this step
-// newly dirties is the migration's own DDL/DML — safe to commit on its own.
+// For a step the pass runs, MigrateUp's pre-flight guard proves no table a
+// pending migration touches holds uncommitted user rows before the pass runs,
+// so every table this step newly dirties is the migration's own DDL/DML, safe
+// to commit on its own. finishStrandedMainStep also commits through here, for
+// a step an interrupted pass left uncommitted; that guard has not run for it,
+// and it commits the step's tables whole, user rows written into them after
+// the kill included.
 func commitMigrationStep(ctx context.Context, db DBConn, cursorTable, migrationName string, dirtyBeforeStep map[string]dirtyTableState) error {
 	dirtyAfter, err := dirtyTables(ctx, db, true)
 	if err != nil {

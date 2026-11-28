@@ -253,6 +253,48 @@ Once you are on the new binary, `bd upgrade review` prints exactly the changes
 between the version you were running and this one. Several commands changed
 defaults, so read it before your first session.
 
+### If an upgrade is interrupted
+
+bd commits each schema migration on its own as it applies it. If the process
+is killed after a migration has run and recorded itself but before its commit
+(a closed terminal, a timeout, a crash), **bd v1.4.0 and later** finish that
+migration in the next migration pass. Run the command that started the
+upgrade again: `bd migrate schema`, or the consent your store needs (see
+[Shared servers](#shared-servers) and
+[Remote-backed databases and multiple clones](#remote-backed-databases-and-multiple-clones)).
+Until then other commands stop for consent, because the database is still
+behind this binary. The pass commits the migration under its own message,
+`schema: apply migration <file>`, logs `committed <file>, which an
+interrupted migration pass applied but did not commit`, and carries on with
+the rest of the upgrade. If you run `bd dolt commit` (or `bd vc commit`)
+first instead, it commits the interrupted migration with your other
+uncommitted changes, under your message, and the next migration pass carries
+on from there.
+
+- **Only the migration's own tables are committed.** These are the tables
+  the migration changed: the ones its SQL writes, `dolt_schemas` when it
+  rewrites a view, and the tables whose rows its deletes remove through
+  foreign keys. If you wrote to the database between the kill and the next
+  migration pass, a change to one of those tables is committed with it.
+  Changes to other tables stay uncommitted, as they were.
+- **A refusal still means real uncommitted work.** If bd then reports
+  `pending schema migrations alter pre-existing dirty tables`, the tables it
+  names hold uncommitted changes of your own (or of a migration that stopped
+  on an error, see
+  [If a migration stops on a value it cannot read](#if-a-migration-stops-on-a-value-it-cannot-read)),
+  not the interrupted migration. Make sure you want to keep those changes
+  before you run the `bd dolt commit` it suggests.
+- **Only a recognizable migration is finished.** bd finishes the migration
+  only when exactly one is uncommitted and it is the next one in sequence
+  with the exact contents of this binary's migration file. Anything else (a
+  migration recorded by hand or by a different bd build, or two uncommitted
+  migrations) is refused as before. A migration killed before it recorded
+  itself is refused too, since bd cannot tell how much of it ran. So is the
+  first migration of an upgrade from a bd older than 1.1.0: the store's last
+  commit records no migration contents to compare with. If the interrupted
+  migration is the newest one this bd version ships, no migration is left to
+  run, and bd does not finish it this way.
+
 ### Remote-backed databases and multiple clones
 
 `bd` refuses to silently apply pending schema migrations to a database that has
