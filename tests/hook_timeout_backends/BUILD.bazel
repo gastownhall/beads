@@ -1,4 +1,5 @@
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//tools/bazel:bd_releases.bzl", "LINUX_AMD64")
 
 # The tracked git hook shims (.githooks/*, managed section only) against real
 # timeout implementations: GNU coreutils and perl from the executor, and
@@ -35,6 +36,7 @@ sh_test(
         "@uutils_coreutils//:coreutils",
     ],
     tags = ["pr-core-only"],
+    target_compatible_with = LINUX_AMD64,
 )
 
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
