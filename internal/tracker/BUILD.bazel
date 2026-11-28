@@ -34,6 +34,7 @@ go_test(
     name = "tracker_test",
     srcs = [
         "engine_close_policy_test.go",
+        "engine_create_only_pull_test.go",
         "engine_create_only_test.go",
         "engine_create_warnings_test.go",
         "engine_dry_run_unaddressable_test.go",

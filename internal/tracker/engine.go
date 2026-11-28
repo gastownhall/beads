@@ -222,6 +222,10 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	}
 
 	// Phase 2: Pull
+	// holdCursor is set when a --create-only pull skipped remote edits it held
+	// for matched local issues. Those edits are still newer than last_sync, so
+	// last_sync must not move past them (see the last_sync write below).
+	holdCursor := false
 	if opts.Pull {
 		pullStats, err := e.doPull(ctx, opts, allowPullOverwriteIDs, skipPushIDs)
 		if err != nil {
@@ -231,6 +235,7 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 			span.SetStatus(codes.Error, result.Error)
 			return result, err
 		}
+		holdCursor = opts.CreateOnly && pullStats.Skipped > 0
 		result.PullStats = *pullStats
 		result.Stats.Pulled = pullStats.Created + pullStats.Updated
 		result.Stats.Created += pullStats.Created
@@ -274,7 +279,9 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	// to half a second in the future of wall clock. Record last_sync at
 	// the next whole second so the engine's own writes are never misread
 	// as local edits by the next pull's conflict guard.
-	if !opts.DryRun {
+	if holdCursor {
+		e.warn("--create-only held remote edits on matched issues; last_sync not advanced, so the next pull fetches them")
+	} else if !opts.DryRun {
 		lastSync := time.Now().UTC().Truncate(time.Second).Add(time.Second).Format(time.RFC3339Nano)
 		key := e.Tracker.ConfigPrefix() + ".last_sync"
 		if err := e.Store.SetLocalMetadata(ctx, key, lastSync); err != nil {
@@ -523,6 +530,15 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		}
 
 		if existing != nil {
+			// --create-only creates beads only for remote issues that match no
+			// local issue; a matched issue is left alone however it matched
+			// (exact ref, fallback index, mapper-assigned ID). Neither a
+			// conflict verdict, pre-linked hydration nor an explicit selection
+			// lifts the hold (gastownhall/beads#8507).
+			if opts.CreateOnly {
+				stats.Skipped++
+				continue
+			}
 			// Conflict-aware pull: skip updating issues that were locally
 			// modified since last sync. Conflict detection (Phase 2) will
 			// handle these per the configured resolution strategy.
@@ -1816,6 +1832,10 @@ func (e *Engine) renderBatchDryRun(issues []*types.Issue, result *BatchPushResul
 	}
 }
 
+// createOnlyExternalWinsMsg reports an external-wins conflict under
+// --create-only, whose pull leaves matched local issues alone.
+const createOnlyExternalWinsMsg = "Conflict on %s: external is newer; --create-only leaves the local issue unchanged"
+
 // resolveConflicts applies the configured conflict resolution strategy.
 func (e *Engine) resolveConflicts(opts SyncOptions, conflicts []Conflict, skipIDs, forceIDs, allowPullOverwriteIDs map[string]bool) {
 	for _, c := range conflicts {
@@ -1827,7 +1847,11 @@ func (e *Engine) resolveConflicts(opts SyncOptions, conflicts []Conflict, skipID
 		case ConflictExternal:
 			skipIDs[c.IssueID] = true
 			allowPullOverwriteIDs[c.IssueID] = true
-			e.msg("Conflict on %s: keeping external version", c.IssueID)
+			if opts.CreateOnly {
+				e.msg(createOnlyExternalWinsMsg, c.IssueID)
+			} else {
+				e.msg("Conflict on %s: keeping external version", c.IssueID)
+			}
 
 		default: // ConflictTimestamp or unset
 			if c.LocalUpdated.After(c.ExternalUpdated) {
@@ -1836,7 +1860,11 @@ func (e *Engine) resolveConflicts(opts SyncOptions, conflicts []Conflict, skipID
 			} else {
 				skipIDs[c.IssueID] = true
 				allowPullOverwriteIDs[c.IssueID] = true
-				e.msg("Conflict on %s: external is newer, importing", c.IssueID)
+				if opts.CreateOnly {
+					e.msg(createOnlyExternalWinsMsg, c.IssueID)
+				} else {
+					e.msg("Conflict on %s: external is newer, importing", c.IssueID)
+				}
 			}
 		}
 	}

@@ -1,0 +1,408 @@
+package tracker
+
+import (
+	"context"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/types"
+)
+
+// #8507: --create-only must hold on a pull too. A pull with CreateOnly may
+// create beads for unlinked remote issues, but it must not update a bead that
+// is already linked, even when the remote title changed.
+func TestEngineCreateOnlyPullLeavesLinkedIssuesAlone(t *testing.T) {
+	ctx := context.Background()
+	state := createOnlyState()
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{{
+		ID:         "uuid-linked",
+		Identifier: "EXT-LINKED",
+		URL:        "https://test.test/EXT-LINKED",
+		Title:      "Edited in Linear",
+	}}
+	engine := NewEngine(tracker, NewUOWStore(&engineUOWProvider{state: state}), "test-actor")
+
+	if _, err := engine.Sync(ctx, SyncOptions{Pull: true, CreateOnly: true}); err != nil {
+		t.Fatalf("Sync(pull, create-only): %v", err)
+	}
+	if got := state.issues["bd-linked"].Title; got != "Already linked" {
+		t.Fatalf("linked bead title = %q after a create-only pull, want it unchanged", got)
+	}
+}
+
+// createOnlyPullMapper gives each pulled remote issue a stable local ID derived
+// from its identifier, so an unmatched remote issue is created under a
+// collision-free ID instead of the empty default.
+func createOnlyPullMapper() *mockMapper {
+	return &mockMapper{issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+		return &IssueConversion{
+			Issue: &types.Issue{
+				ID:        "bd-pulled-" + strings.ToLower(ti.Identifier),
+				Title:     ti.Title,
+				Priority:  2,
+				Status:    types.StatusOpen,
+				IssueType: types.TypeTask,
+			},
+		}
+	}}
+}
+
+// createOnlyPullRemote returns the remote side of the create-only pull
+// fixtures: the linked bead's remote issue, retitled remotely, and one remote
+// issue no local bead matches.
+func createOnlyPullRemote() []TrackerIssue {
+	return []TrackerIssue{
+		{
+			ID:         "ext-linked",
+			Identifier: "EXT-LINKED",
+			Title:      "Retitled remotely",
+			State:      types.StatusOpen,
+			Priority:   2,
+		},
+		{
+			ID:         "ext-new",
+			Identifier: "EXT-NEW",
+			Title:      "Only remote",
+			State:      types.StatusOpen,
+			Priority:   2,
+		},
+	}
+}
+
+// assertLinkedBeadUntouched fails when the pull applied any update to the
+// store or changed the linked bead.
+func assertLinkedBeadUntouched(t *testing.T, state *engineUOWState) {
+	t.Helper()
+	if !reflect.DeepEqual(state.updateSpec, domain.UpdateSpec{}) {
+		t.Errorf("pull applied an issue update %+v, want none under --create-only", state.updateSpec)
+	}
+	linked := state.issues["bd-linked"]
+	if linked.Title != "Already linked" {
+		t.Errorf("linked bead title = %q, want %q (left alone)", linked.Title, "Already linked")
+	}
+	if linked.ExternalRef == nil || *linked.ExternalRef != "https://test.test/EXT-LINKED" {
+		t.Errorf("linked bead external_ref = %v, want https://test.test/EXT-LINKED", linked.ExternalRef)
+	}
+}
+
+// TestEngineCreateOnlyPullCreatesOnlyUnmatched covers AC-1: a --create-only
+// pull creates a bead for the remote issue that matches no local bead, holds
+// the matched linked bead, and counts it as skipped. The control run without
+// --create-only proves the gate is what stops the write.
+func TestEngineCreateOnlyPullCreatesOnlyUnmatched(t *testing.T) {
+	ctx := context.Background()
+	state := createOnlyState()
+	tracker := newMockTracker("test")
+	tracker.fieldMapper = createOnlyPullMapper()
+	tracker.issues = createOnlyPullRemote()
+	engine := NewEngine(tracker, NewUOWStore(&engineUOWProvider{state: state}), "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true, CreateOnly: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	assertLinkedBeadUntouched(t, state)
+	if got := result.PullStats; got.Created != 1 || got.Updated != 0 || got.Skipped != 1 {
+		t.Errorf("PullStats = {Created:%d Updated:%d Skipped:%d}, want {Created:1 Updated:0 Skipped:1}",
+			got.Created, got.Updated, got.Skipped)
+	}
+	// The unmatched remote issue is created and linked to its ref.
+	created := state.issues["bd-pulled-ext-new"]
+	if created == nil {
+		t.Fatalf("no bead created for unmatched remote issue EXT-NEW")
+	}
+	if created.Title != "Only remote" {
+		t.Errorf("created bead title = %q, want %q", created.Title, "Only remote")
+	}
+	if created.ExternalRef == nil || *created.ExternalRef != "https://test.test/EXT-NEW" {
+		t.Errorf("created bead external_ref = %v, want the remote ref", created.ExternalRef)
+	}
+
+	t.Run("control without create-only updates the linked bead", func(t *testing.T) {
+		state := createOnlyState()
+		tracker := newMockTracker("test")
+		tracker.issues = createOnlyPullRemote()
+		engine := NewEngine(tracker, NewUOWStore(&engineUOWProvider{state: state}), "test-actor")
+		result, err := engine.Sync(ctx, SyncOptions{Pull: true})
+		if err != nil {
+			t.Fatalf("Sync() error: %v", err)
+		}
+		if got := state.issues["bd-linked"].Title; got != "Retitled remotely" {
+			t.Errorf("linked bead title = %q, want %q without --create-only", got, "Retitled remotely")
+		}
+		if result.PullStats.Updated != 1 {
+			t.Errorf("PullStats.Updated = %d, want 1 without --create-only", result.PullStats.Updated)
+		}
+	})
+}
+
+// TestEngineCreateOnlyPullFallbackMatchHeld covers the fallback-index row of
+// AC-1: a linked bead whose stored ref differs from the remote ref but whose
+// match key agrees is held, and no duplicate bead is created for it.
+func TestEngineCreateOnlyPullFallbackMatchHeld(t *testing.T) {
+	ctx := context.Background()
+	state := createOnlyState()
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{{
+		ID:         "ext-linked",
+		Identifier: "EXT-LINKED",
+		URL:        "https://moved.test/EXT-LINKED",
+		Title:      "Retitled remotely",
+		State:      types.StatusOpen,
+		Priority:   2,
+	}}
+	engine := NewEngine(tracker, NewUOWStore(&engineUOWProvider{state: state}), "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true, CreateOnly: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	assertLinkedBeadUntouched(t, state)
+	if len(state.issues) != 2 {
+		t.Errorf("store holds %d beads, want 2: the fallback match must not be duplicated", len(state.issues))
+	}
+	if got := result.PullStats; got.Created != 0 || got.Updated != 0 || got.Skipped != 1 {
+		t.Errorf("PullStats = {Created:%d Updated:%d Skipped:%d}, want {Created:0 Updated:0 Skipped:1}",
+			got.Created, got.Updated, got.Skipped)
+	}
+}
+
+// TestEngineCreateOnlyPullDryRunMatchesRealRun covers AC-2: the dry-run
+// preview of a --create-only pull shows no update for the linked bead, shows
+// the import of the unmatched issue, writes nothing, and reports the stats of
+// the real run.
+func TestEngineCreateOnlyPullDryRunMatchesRealRun(t *testing.T) {
+	ctx := context.Background()
+	state := createOnlyState()
+	tracker := newMockTracker("test")
+	tracker.issues = createOnlyPullRemote()
+	engine := NewEngine(tracker, NewUOWStore(&engineUOWProvider{state: state}), "test-actor")
+	var msgs []string
+	engine.OnMessage = func(msg string) { msgs = append(msgs, msg) }
+
+	dry, err := engine.Sync(ctx, SyncOptions{Pull: true, DryRun: true, CreateOnly: true})
+	if err != nil {
+		t.Fatalf("Sync() dry-run error: %v", err)
+	}
+	joined := strings.Join(msgs, "\n")
+	if strings.Contains(joined, "Would update local issue") {
+		t.Errorf("dry-run messages = %q, did not expect a local update preview under --create-only", joined)
+	}
+	if !strings.Contains(joined, "Would import: EXT-NEW - Only remote") {
+		t.Errorf("dry-run messages = %q, want an import preview for EXT-NEW", joined)
+	}
+	assertLinkedBeadUntouched(t, state)
+	if len(state.issues) != 2 || state.commits != 0 {
+		t.Errorf("dry-run wrote to the store: beads=%d commits=%d, want 2 beads and no commit", len(state.issues), state.commits)
+	}
+	if len(tracker.created) != 0 || len(tracker.updated) != 0 {
+		t.Errorf("dry-run wrote to the tracker: created=%d updated=%d", len(tracker.created), len(tracker.updated))
+	}
+
+	liveState := createOnlyState()
+	liveTracker := newMockTracker("test")
+	liveTracker.issues = createOnlyPullRemote()
+	live, err := NewEngine(liveTracker, NewUOWStore(&engineUOWProvider{state: liveState}), "test-actor").
+		Sync(ctx, SyncOptions{Pull: true, CreateOnly: true})
+	if err != nil {
+		t.Fatalf("Sync() real run error: %v", err)
+	}
+	d, l := dry.PullStats, live.PullStats
+	if d.Created != l.Created || d.Updated != l.Updated || d.Skipped != l.Skipped {
+		t.Errorf("dry-run PullStats {Created:%d Updated:%d Skipped:%d} != real run {Created:%d Updated:%d Skipped:%d}",
+			d.Created, d.Updated, d.Skipped, l.Created, l.Updated, l.Skipped)
+	}
+}
+
+// TestEngineCreateOnlyPullHoldsMapperIDMatch covers AC-3: an unlinked bead
+// that a remote issue matches only by its mapper-assigned bead ID (Notion's
+// "Beads ID") is neither rewritten nor linked, and no bead is created.
+func TestEngineCreateOnlyPullHoldsMapperIDMatch(t *testing.T) {
+	ctx := context.Background()
+	state := createOnlyState()
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{{
+		ID:         "ext-fresh",
+		Identifier: "EXT-FRESH",
+		Title:      "Remote title for fresh",
+		State:      types.StatusOpen,
+		Priority:   2,
+	}}
+	tracker.fieldMapper = &mockMapper{issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+		return &IssueConversion{Issue: &types.Issue{
+			ID:        "bd-fresh",
+			Title:     ti.Title,
+			Status:    types.StatusOpen,
+			IssueType: types.TypeTask,
+			Priority:  2,
+		}}
+	}}
+	engine := NewEngine(tracker, NewUOWStore(&engineUOWProvider{state: state}), "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true, CreateOnly: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if !reflect.DeepEqual(state.updateSpec, domain.UpdateSpec{}) {
+		t.Errorf("pull applied an issue update %+v, want none under --create-only", state.updateSpec)
+	}
+	fresh := state.issues["bd-fresh"]
+	if fresh.Title != "Not yet linked" {
+		t.Errorf("bd-fresh title = %q, want %q (left alone)", fresh.Title, "Not yet linked")
+	}
+	if fresh.ExternalRef != nil {
+		t.Errorf("bd-fresh external_ref = %q, want none (left unlinked)", *fresh.ExternalRef)
+	}
+	if len(state.issues) != 2 {
+		t.Errorf("store holds %d beads, want 2: the mapper-ID match must not create a bead", len(state.issues))
+	}
+	if got := result.PullStats; got.Created != 0 || got.Updated != 0 || got.Skipped != 1 {
+		t.Errorf("PullStats = {Created:%d Updated:%d Skipped:%d}, want {Created:0 Updated:0 Skipped:1}",
+			got.Created, got.Updated, got.Skipped)
+	}
+}
+
+// TestEngineCreateOnlyPullSelectiveHoldsNamedBead covers AC-4: naming a linked
+// bead with --issues narrows the fetch but does not lift --create-only.
+func TestEngineCreateOnlyPullSelectiveHoldsNamedBead(t *testing.T) {
+	ctx := context.Background()
+	state := createOnlyState()
+	tracker := newMockTracker("test")
+	tracker.issues = createOnlyPullRemote()
+	engine := NewEngine(tracker, NewUOWStore(&engineUOWProvider{state: state}), "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true, CreateOnly: true, IssueIDs: []string{"bd-linked"}})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if tracker.fetchCalls != 1 {
+		t.Fatalf("tracker.fetchCalls = %d, want 1: the selective pull must fetch the named issue", tracker.fetchCalls)
+	}
+	assertLinkedBeadUntouched(t, state)
+	if result.PullStats.Updated != 0 {
+		t.Errorf("PullStats.Updated = %d, want 0 under --create-only", result.PullStats.Updated)
+	}
+}
+
+// TestEngineCreateOnlyPullExternalWinsConflict covers AC-5: a conflict whose
+// resolution chose the external version neither lifts the hold nor claims an
+// import under --create-only.
+func TestEngineCreateOnlyPullExternalWinsConflict(t *testing.T) {
+	t.Run("conflict messages", func(t *testing.T) {
+		const want = "Conflict on bd-linked: external is newer; --create-only leaves the local issue unchanged"
+		now := time.Now().UTC()
+		for _, tc := range []struct {
+			name     string
+			strategy ConflictResolution
+		}{
+			{"external strategy", ConflictExternal},
+			{"timestamp strategy, external newer", ConflictTimestamp},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				engine := NewEngine(newMockTracker("test"), NewUOWStore(&engineUOWProvider{state: createOnlyState()}), "test-actor")
+				var msgs []string
+				engine.OnMessage = func(msg string) { msgs = append(msgs, msg) }
+				skip, force, allow := map[string]bool{}, map[string]bool{}, map[string]bool{}
+				engine.resolveConflicts(SyncOptions{CreateOnly: true, ConflictResolution: tc.strategy},
+					[]Conflict{{IssueID: "bd-linked", LocalUpdated: now.Add(-time.Hour), ExternalUpdated: now}},
+					skip, force, allow)
+				if joined := strings.Join(msgs, "\n"); joined != want {
+					t.Errorf("messages = %q, want %q", joined, want)
+				}
+				if !skip["bd-linked"] || !allow["bd-linked"] || force["bd-linked"] {
+					t.Errorf("skip=%v force=%v allow=%v, want skip and allow set for bd-linked", skip, force, allow)
+				}
+			})
+		}
+	})
+
+	t.Run("control without create-only names the import", func(t *testing.T) {
+		now := time.Now().UTC()
+		for _, tc := range []struct {
+			name     string
+			strategy ConflictResolution
+			want     string
+		}{
+			{"external strategy", ConflictExternal, "Conflict on bd-linked: keeping external version"},
+			{"timestamp strategy, external newer", ConflictTimestamp, "Conflict on bd-linked: external is newer, importing"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				engine := NewEngine(newMockTracker("test"), NewUOWStore(&engineUOWProvider{state: createOnlyState()}), "test-actor")
+				var msgs []string
+				engine.OnMessage = func(msg string) { msgs = append(msgs, msg) }
+				skip, force, allow := map[string]bool{}, map[string]bool{}, map[string]bool{}
+				engine.resolveConflicts(SyncOptions{ConflictResolution: tc.strategy},
+					[]Conflict{{IssueID: "bd-linked", LocalUpdated: now.Add(-time.Hour), ExternalUpdated: now}},
+					skip, force, allow)
+				if joined := strings.Join(msgs, "\n"); joined != tc.want {
+					t.Errorf("messages = %q, want %q", joined, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("pull holds an allowed overwrite", func(t *testing.T) {
+		ctx := context.Background()
+		state := createOnlyState()
+		tracker := newMockTracker("test")
+		tracker.issues = createOnlyPullRemote()
+		engine := NewEngine(tracker, NewUOWStore(&engineUOWProvider{state: state}), "test-actor")
+
+		stats, err := engine.doPull(ctx, SyncOptions{Pull: true, CreateOnly: true},
+			map[string]bool{"bd-linked": true}, map[string]bool{})
+		if err != nil {
+			t.Fatalf("doPull() error: %v", err)
+		}
+		assertLinkedBeadUntouched(t, state)
+		if stats.Updated != 0 {
+			t.Errorf("PullStats.Updated = %d, want 0 under --create-only", stats.Updated)
+		}
+	})
+}
+
+// #8621 (review): a create-only pull that skips a remote edit it held for a
+// matched issue must not advance last_sync past that edit, or the next
+// ordinary pull never fetches it. LastSync is empty when the cursor is held.
+func TestEngineCreateOnlyPullHoldsCursorWhenItSkipsAnEdit(t *testing.T) {
+	ctx := context.Background()
+	state := createOnlyState()
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{{
+		ID:         "uuid-linked",
+		Identifier: "EXT-LINKED",
+		URL:        "https://test.test/EXT-LINKED",
+		Title:      "Edited in Linear",
+	}}
+	engine := NewEngine(tracker, NewUOWStore(&engineUOWProvider{state: state}), "test-actor")
+
+	res, err := engine.Sync(ctx, SyncOptions{Pull: true, CreateOnly: true})
+	if err != nil {
+		t.Fatalf("Sync(pull, create-only): %v", err)
+	}
+	if res.PullStats.Skipped == 0 {
+		t.Fatalf("fixture skipped no remote edit, so the cursor hold is not exercised")
+	}
+	if res.LastSync != "" {
+		t.Fatalf("LastSync = %q after a create-only pull that skipped an edit, want the cursor held", res.LastSync)
+	}
+}
+
+// Control: a create-only pull with nothing held still advances last_sync.
+func TestEngineCreateOnlyPullAdvancesCursorWhenNothingHeld(t *testing.T) {
+	ctx := context.Background()
+	state := createOnlyState()
+	tracker := newMockTracker("test")
+	engine := NewEngine(tracker, NewUOWStore(&engineUOWProvider{state: state}), "test-actor")
+
+	res, err := engine.Sync(ctx, SyncOptions{Pull: true, CreateOnly: true})
+	if err != nil {
+		t.Fatalf("Sync(pull, create-only): %v", err)
+	}
+	if res.LastSync == "" {
+		t.Fatalf("LastSync empty after a create-only pull that held nothing, want it advanced")
+	}
+}
