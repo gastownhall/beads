@@ -35,8 +35,10 @@ var rbeForkInstance = map[string]string{"ro": "oss-fork", "rw": "oss"}
 // timeouts on a "timeouts" line), and answers as BAZEL_TEST_MINT_CERT says: ro / rw (sign the CSR at
 // BAZEL_TEST_CSR, as the mint would after downloading the artifact),
 // ro-as-rw (tier rw with instance oss-fork), evil-endpoint, an HTTP status
-// with an error body, 000 (connection refused), or "<first>-then-<rest>"
-// (the first call answers <first>).
+// with an error body, 000 (connection refused), 403-artifact (the mint's
+// answer when GitHub does not serve the request's artifact),
+// 403-other-artifact (the same words about an id that only ends in the
+// request's), or "<first>-then-<rest>" (the first call answers <first>).
 const bazelTestMintCertStub = `#!/usr/bin/env bash
 set -euo pipefail
 d=$BAZEL_TEST_MINT_DIR
@@ -72,6 +74,8 @@ rw) sign rw oss ;;
 ro-as-rw) sign rw oss-fork ;;
 evil-endpoint) sign ro oss-fork grpcs://elsewhere.example:443 ;;
 000) echo "curl: (7) Failed to connect to rbe-mint.ops.gascity.com port 8444" >&2; exit 7 ;;
+403-artifact) reply 403 "$(jq -c '{error: "not found: /repos/gastownhall/beads/actions/artifacts/\(.artifact_id)"}' <<<"$data")" ;;
+403-other-artifact) reply 403 "$(jq -c '{error: "not found: /repos/gastownhall/beads/actions/artifacts/1\(.artifact_id)"}' <<<"$data")" ;;
 *) reply "$answer" "{\"error\": \"stub answer $answer\"}" ;;
 esac
 `
@@ -171,9 +175,10 @@ var (
 // key (EC P-256, PKCS#8, 0600, outside the workspace), the CSR artifact's
 // name, the request body (exactly the mint's six keys), the endpoint pin, the
 // tier/instance pairing, the tier check against the rbe job's, the retries
-// (429, 502 and connection failures only; backoff 10, 20, 30 s, none after
-// the last attempt), the timeouts (a closed gate drops the connection) and
-// the refusals.
+// (429, 502, connection failures and the 403 that says GitHub does not serve
+// this request's artifact yet, and nothing else; backoff 10, 20, 30 s, none
+// after the last attempt), the timeouts (a closed gate drops the connection)
+// and the refusals.
 func TestSetupBazelForkCredential(t *testing.T) {
 	requireHostTool(t, "bash")
 	m := newForkMint(t)
@@ -268,7 +273,7 @@ func TestSetupBazelForkCredential(t *testing.T) {
 	}
 	wantBody := map[string]any{"repo": "beads", "run_id": 4242.0, "run_attempt": 2.0, "pr": 7123.0, "job": "bazel-test", "artifact_id": 99.0}
 	for _, tier := range []string{"ro", "rw"} {
-		for _, answer := range []string{tier, "429-then-" + tier, "502-then-" + tier, "000-then-" + tier} {
+		for _, answer := range []string{tier, "429-then-" + tier, "502-then-" + tier, "000-then-" + tier, "403-artifact-then-" + tier} {
 			got, logs, err := cert(t, answer, tier)
 			if err != nil {
 				t.Errorf("cert %s (mint %s): %v\n%s", tier, answer, err, logs)
@@ -288,6 +293,13 @@ func TestSetupBazelForkCredential(t *testing.T) {
 			}
 			if got, want := forkMintSleeps(m.log(t)), map[bool]string{false: "", true: "10"}[strings.Contains(answer, "-then-")]; got != want {
 				t.Errorf("mint %s: slept %q, want %q:\n%s", answer, got, want, m.log(t))
+			}
+			// Each retry is named in the step's log, with the answer that caused it.
+			if got, want := strings.Count(logs, " on attempt 1 of 4; asking again in 10 s\n"), calls-1; got != want || strings.Count(logs, "asking again") != want {
+				t.Errorf("mint %s: %d retry lines for attempt 1, want %d:\n%s", answer, got, want, logs)
+			}
+			if code, _, retried := strings.Cut(answer, "-"); retried && !strings.Contains(logs, "rbe-fork mint answered HTTP "+code+" on attempt 1 of 4") {
+				t.Errorf("mint %s: the retry line does not name HTTP %s:\n%s", answer, code, logs)
 			}
 			if got := strings.Count(m.log(t), "timeouts connect=5 max=60\n"); got != calls {
 				t.Errorf("mint %s: %d of %d requests with --connect-timeout 5 --max-time 60:\n%s", answer, got, calls, m.log(t))
@@ -313,6 +325,12 @@ func TestSetupBazelForkCredential(t *testing.T) {
 		why          string
 	}{
 		{"403", "ro", 1, "rbe-fork mint refused (HTTP 403)"},
+		// An artifact GitHub never serves still fails, after the same four
+		// attempts, with the mint's own words in the error.
+		{"403-artifact", "ro", 4, "not found: /repos/gastownhall/beads/actions/artifacts/99"},
+		// The retry is for the artifact this request names (99), not for any
+		// id that ends in it.
+		{"403-other-artifact", "ro", 1, "not found: /repos/gastownhall/beads/actions/artifacts/199"},
 		{"409", "ro", 1, "rbe-fork mint refused (HTTP 409)"},
 		{"429", "ro", 4, "rbe-fork mint refused (HTTP 429)"},
 		{"503", "rw", 1, "rbe-fork mint refused (HTTP 503)"},
@@ -336,6 +354,10 @@ func TestSetupBazelForkCredential(t *testing.T) {
 		// Backoff between attempts only: nothing after the last one.
 		if got, want := forkMintSleeps(m.log(t)), map[int]string{1: "", 4: "10 20 30"}[c.calls]; got != want {
 			t.Errorf("mint %s: slept %q, want %q", c.answer, got, want)
+		}
+		// One log line per retry, none after the last attempt.
+		if got := strings.Count(logs, "; asking again in "); got != c.calls-1 {
+			t.Errorf("mint %s: %d retry lines, want %d\n%s", c.answer, got, c.calls-1, logs)
 		}
 	}
 	// cert needs every fact it sends.

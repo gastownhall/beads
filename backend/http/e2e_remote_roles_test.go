@@ -516,6 +516,23 @@ func TestE2E_CloseAndReopenUnderClaudeSession(t *testing.T) {
 	if row := status(); row["status"] != "open" {
 		t.Errorf("after the second reopen: %v", row)
 	}
+
+	// The same two paths under the variable Claude Code itself exports
+	// (beads#5450): the update's notice names the variable the session came
+	// from, and bd close records it.
+	harness := []string{"CLAUDE_CODE_SESSION_ID=sess-harness"}
+	ambient = f.mustRun(harness, "update", id, "--status", "closed", "--json")
+	if !strings.Contains(ambient.stderr, "CLAUDE_CODE_SESSION_ID is not recorded") {
+		t.Errorf("the session from CLAUDE_CODE_SESSION_ID was dropped without a notice naming it: stderr=%s", ambient.stderr)
+	}
+	if row := status(); row["status"] != "closed" {
+		t.Fatalf("after update -s closed under CLAUDE_CODE_SESSION_ID: %v", row)
+	}
+	f.mustRun(harness, "reopen", id, "--json")
+	f.mustRun(harness, "close", id, "--json")
+	if row := status(); row["status"] != "closed" || row["closed_by_session"] != "sess-harness" {
+		t.Errorf("after bd close under CLAUDE_CODE_SESSION_ID: status=%v closed_by_session=%v; want closed/sess-harness", row["status"], row["closed_by_session"])
+	}
 }
 
 // TestE2E_ShowMissingIDIsNotFoundInOneLookup is S6b: `bd show <missing>`

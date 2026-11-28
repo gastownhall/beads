@@ -39,9 +39,10 @@ type purgeScope struct {
 	protectReferenced bool
 	// protectLiveDependents asks the role to skip candidates a live bead
 	// depends on through a parent-child, tracks or blocks edge. `bd purge`
-	// always asks: deleting a closed wisp whose child, tracker or blocked bead
-	// is still live cuts that live work loose from its root, and there is no
-	// retention reason to want that — a deliberate removal is `bd delete`.
+	// and `bd prune` always ask: deleting a closed bead whose child, tracker
+	// or blocked bead is still live cuts that live work loose from its root,
+	// and there is no retention reason to want that — a deliberate removal is
+	// `bd delete`.
 	protectLiveDependents bool
 	// reportsReferences publishes the reference-skip keys under --json. It is
 	// separate from protectReferenced because `bd prune --ignore-references`

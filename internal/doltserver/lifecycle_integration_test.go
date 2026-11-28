@@ -1026,3 +1026,92 @@ func TestLifecycle_ServesDatabaseDirOnPort(t *testing.T) {
 		t.Errorf("ServesDatabaseDirOnPort(%s, %d) = true after the server stopped", served, state.Port)
 	}
 }
+
+// TestLifecycle_ManagedServerConfinesSQLFileAccess starts a managed server
+// and reads what its SQL can do with files. The server runs as the user, with
+// a passwordless root that holds the FILE privilege, and Dolt's default
+// secure_file_priv ("") lets LOAD_FILE, LOAD DATA INFILE and SELECT ... INTO
+// OUTFILE reach any path the server process can. The generated config names
+// one directory under .beads instead, which bd does not create, so every one
+// of those statements is refused until an operator creates it.
+func TestLifecycle_ManagedServerConfinesSQLFileAccess(t *testing.T) {
+	beadsDir := setupLifecycleTestDir(t)
+	reg := integration.NewProcessRegistry(t)
+	diag := integration.NewDiagnostics(t, beadsDir)
+	diag.CaptureOnFailure()
+
+	state, err := doltserver.Start(beadsDir)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if p, err := os.FindProcess(state.PID); err == nil {
+		reg.Register(p)
+	}
+	t.Cleanup(func() { _ = doltserver.Stop(beadsDir) })
+	db := connectMySQL(t, state.Port)
+	defer db.Close()
+
+	filesDir := filepath.Join(beadsDir, doltserver.ServerFilesDirName)
+	var priv string
+	if err := db.QueryRow("SELECT @@global.secure_file_priv").Scan(&priv); err != nil {
+		t.Fatalf("SELECT @@global.secure_file_priv: %v", err)
+	}
+	if priv != filesDir {
+		t.Fatalf("@@global.secure_file_priv = %q, want %q", priv, filesDir)
+	}
+	if _, err := os.Stat(filesDir); !os.IsNotExist(err) {
+		t.Fatalf("Start created %s (stat error %v); bd leaves it to the operator", filesDir, err)
+	}
+
+	outsideDir := t.TempDir()
+	secret := filepath.Join(outsideDir, "secret")
+	if err := os.WriteFile(secret, []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var got sql.NullString
+	if err := db.QueryRow("SELECT LOAD_FILE(?)", secret).Scan(&got); err != nil {
+		t.Fatalf("LOAD_FILE(%s): %v", secret, err)
+	}
+	if got.Valid {
+		t.Errorf("LOAD_FILE(%s) = %q, want NULL: the file is outside secure_file_priv", secret, got.String)
+	}
+	written := filepath.Join(outsideDir, "written")
+	if _, err := db.Exec("SELECT 1 INTO OUTFILE '" + written + "'"); err == nil {
+		t.Errorf("SELECT ... INTO OUTFILE %s succeeded outside secure_file_priv", written)
+	}
+	if _, err := os.Stat(written); !os.IsNotExist(err) {
+		t.Errorf("INTO OUTFILE created %s (stat error %v)", written, err)
+	}
+	if _, err := db.Exec("CREATE TABLE loaded (line VARCHAR(100))"); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	if _, err := db.Exec("LOAD DATA INFILE '" + secret + "' INTO TABLE loaded"); err == nil {
+		t.Errorf("LOAD DATA INFILE %s succeeded outside secure_file_priv", secret)
+	}
+	var rows int
+	if err := db.QueryRow("SELECT COUNT(*) FROM loaded").Scan(&rows); err != nil {
+		t.Fatalf("count loaded rows: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("LOAD DATA INFILE read %d row(s) from %s", rows, secret)
+	}
+
+	// The directory is the operator's way in: once it exists, the server
+	// reads a file inside it, and still nothing outside it.
+	if err := os.Mkdir(filesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	inside := filepath.Join(filesDir, "ok")
+	if err := os.WriteFile(inside, []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT LOAD_FILE(?)", inside).Scan(&got); err != nil || got.String != "ok" {
+		t.Errorf("LOAD_FILE(%s) inside secure_file_priv = %q, %v; want \"ok\"", inside, got.String, err)
+	}
+	if err := db.QueryRow("SELECT LOAD_FILE(?)", secret).Scan(&got); err != nil {
+		t.Fatalf("LOAD_FILE(%s): %v", secret, err)
+	}
+	if got.Valid {
+		t.Errorf("LOAD_FILE(%s) = %q once %s exists, want NULL", secret, got.String, filesDir)
+	}
+}

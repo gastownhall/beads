@@ -1646,6 +1646,29 @@ func doltServerConfigPath(beadsDir string) string {
 	return filepath.Join(beadsDir, doltServerConfigFileName)
 }
 
+// ServerFilesDirName is the directory, beside the generated config in
+// beadsDir, that the generated config names as the server's secure_file_priv
+// (see doltServerFilesDir).
+const ServerFilesDirName = "dolt-server-files"
+
+// doltServerFilesDir is the secure_file_priv of a server launched from the
+// generated config: the only directory its SQL can read files from (LOAD_FILE,
+// LOAD DATA INFILE) or write them to (SELECT ... INTO OUTFILE / DUMPFILE).
+//
+// Dolt's default is "", which allows any path the server process can reach.
+// The managed server runs as the user with a passwordless root that holds the
+// FILE privilege, so with the default any local process that can open the
+// loopback port reads and writes the user's files through SQL, including a
+// process that is sandboxed away from the file system itself.
+//
+// bd does not create the directory. While it does not exist the server
+// refuses every one of those statements (LOAD_FILE returns NULL), which is
+// the setting bd itself needs: it never reads or writes a file through SQL.
+// An operator who wants server-side file access creates it.
+func doltServerFilesDir(beadsDir string) string {
+	return filepath.Join(beadsDir, ServerFilesDirName)
+}
+
 // doltCfgDirName mirrors commands.DefaultCfgDirName in the pinned dolt
 // module (cmd/dolt/commands/sql.go) — the on-disk directory name Dolt looks
 // in for privileges.db (users/passwords) and branch_control.db.
@@ -1744,12 +1767,21 @@ func resolveCfgDir(doltDir string) (string, error) {
 // flag-mode .doltcfg discovery entirely, so this is the one place that
 // behavior must be replicated.
 //
+// secureFilePriv becomes system_variables.secure_file_priv (see
+// doltServerFilesDir). It must be absolute: the server resolves a relative
+// one against its own working directory, the Dolt data directory. The config
+// file is the only way to set it, because the variable is read-only from SQL
+// and sql-server has no flag for it, so a server launched with command-line
+// flags (a Dolt older than MinDoltVersionForArchiveLevelConfig) keeps Dolt's
+// default. system_variables has been a config key since Dolt 1.11.1, older
+// than that minimum.
+//
 // Callers MUST only use this when SupportsArchiveLevelConfig(doltBin)
 // reports true — an older external dolt's own YAMLConfig struct may lack
 // this field, and Dolt's YAML loader uses yaml.UnmarshalStrict, so an
 // unrecognized key is a hard parse error at server startup, not a
 // silently-ignored one.
-func buildDoltServerYAMLConfig(host string, port, remotesAPIPort int, debug bool, cfgDir string) ([]byte, error) {
+func buildDoltServerYAMLConfig(host string, port, remotesAPIPort int, debug bool, cfgDir, secureFilePriv string) ([]byte, error) {
 	logLevel := serverLogLevel(debug)
 	archiveLevel := 0
 	yc := &servercfg.YAMLConfig{
@@ -1758,7 +1790,8 @@ func buildDoltServerYAMLConfig(host string, port, remotesAPIPort int, debug bool
 			HostStr:    &host,
 			PortNumber: &port,
 		},
-		CfgDirStr: &cfgDir,
+		CfgDirStr:   &cfgDir,
+		SystemVars_: map[string]interface{}{"secure_file_priv": secureFilePriv},
 		BehaviorConfig: servercfg.BehaviorYAMLConfig{
 			AutoGCBehavior: &servercfg.AutoGCBehaviorYAMLConfig{
 				ArchiveLevel_: &archiveLevel,
@@ -1963,10 +1996,17 @@ func startLocked(beadsDir string) (*State, error) {
 		// Start() outright rather than retry into a fresh unintended
 		// $data_dir/.doltcfg (see resolveCfgDir).
 		var cfgDir string
+		// secureFilePriv is absolute for the reason configPath is, below: the
+		// child's cwd is doltDir.
+		var secureFilePriv string
 		if useArchiveLevelConfig {
 			cfgDir, err = resolveCfgDir(doltDir)
 			if err != nil {
 				return nil, fmt.Errorf("resolving .doltcfg directory: %w", err)
+			}
+			secureFilePriv, err = filepath.Abs(doltServerFilesDir(beadsDir))
+			if err != nil {
+				return nil, fmt.Errorf("resolving managed sql-server secure_file_priv directory: %w", err)
 			}
 		}
 
@@ -2045,7 +2085,7 @@ func startLocked(beadsDir string) (*State, error) {
 
 			var cmdArgs []string
 			if useArchiveLevelConfig {
-				cfgBody, cfgErr := buildDoltServerYAMLConfig(cfg.Host, actualPort, cfg.RemotesAPIPort, debug, cfgDir)
+				cfgBody, cfgErr := buildDoltServerYAMLConfig(cfg.Host, actualPort, cfg.RemotesAPIPort, debug, cfgDir, secureFilePriv)
 				if cfgErr != nil {
 					lastErr = fmt.Errorf("rendering managed sql-server config: %w", cfgErr)
 					if movable {

@@ -399,3 +399,32 @@ func TestReplacesExistingNotes(t *testing.T) {
 		})
 	}
 }
+
+// TestAmbientSession pins the helper the closing verbs read a session through
+// when --session is not typed (beads#5450). It carries no build tag, so the
+// lanes without cgo run it too; the per-verb pins are in
+// TestParityCloseVerbsReadAmbientSession.
+func TestAmbientSession(t *testing.T) {
+	cases := []struct {
+		name        string
+		own         string // CLAUDE_SESSION_ID
+		harness     string // CLAUDE_CODE_SESSION_ID
+		wantSession string
+		wantEnvVar  string
+	}{
+		{name: "neither variable"},
+		{name: "CLAUDE_CODE_SESSION_ID alone", harness: "harness-session", wantSession: "harness-session", wantEnvVar: "CLAUDE_CODE_SESSION_ID"},
+		{name: "CLAUDE_SESSION_ID alone", own: "own-session", wantSession: "own-session", wantEnvVar: "CLAUDE_SESSION_ID"},
+		{name: "CLAUDE_SESSION_ID wins over CLAUDE_CODE_SESSION_ID", own: "own-session", harness: "harness-session", wantSession: "own-session", wantEnvVar: "CLAUDE_SESSION_ID"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CLAUDE_SESSION_ID", tc.own)
+			t.Setenv("CLAUDE_CODE_SESSION_ID", tc.harness)
+			session, envVar := ambientSession()
+			if session != tc.wantSession || envVar != tc.wantEnvVar {
+				t.Errorf("ambientSession() = %q from %q, want %q from %q", session, envVar, tc.wantSession, tc.wantEnvVar)
+			}
+		})
+	}
+}

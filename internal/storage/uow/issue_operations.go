@@ -371,17 +371,18 @@ func updateSpec(request publicops.UpdateRequest) (domain.UpdateSpec, error) {
 		setLabels = &labels
 	}
 	return domain.UpdateSpec{
-		Fields:            fields,
-		Claim:             request.Claim,
-		ForceClaimBlocked: request.ForceClaimBlocked,
-		ExpectedVersion:   request.ExpectedVersion,
-		ExpectedAssignee:  request.ExpectedAssignee,
-		ExpectedStatus:    statusPointer(request.ExpectedStatus),
-		Persistence:       persistence,
-		AddLabels:         append([]string(nil), patch.Labels.Add...),
-		RemoveLabels:      append([]string(nil), patch.Labels.Remove...),
-		SetLabels:         setLabels,
-		Reparent:          fieldStringPointer(patch.ParentID),
+		Fields:              fields,
+		Claim:               request.Claim,
+		ForceClaimBlocked:   request.ForceClaimBlocked,
+		ExpectedVersion:     request.ExpectedVersion,
+		ExpectedAssignee:    request.ExpectedAssignee,
+		ExpectedStatus:      statusPointer(request.ExpectedStatus),
+		Persistence:         persistence,
+		AddLabels:           append([]string(nil), patch.Labels.Add...),
+		RemoveLabels:        append([]string(nil), patch.Labels.Remove...),
+		RemoveLabelPrefixes: append([]string(nil), patch.Labels.RemovePrefixes...),
+		SetLabels:           setLabels,
+		Reparent:            fieldStringPointer(patch.ParentID),
 	}, nil
 }
 

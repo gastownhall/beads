@@ -1,6 +1,7 @@
 package fix
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -1325,5 +1326,49 @@ func TestDetectExternalHookManagers_MultiplePresentInOrder(t *testing.T) {
 		if managers[i].Name != exp {
 			t.Errorf("managers[%d]: expected %q, got %q", i, exp, managers[i].Name)
 		}
+	}
+}
+
+// TestGitHooksLeavesUnmanagedHooksAlone pins hooks.manage: false (bd-cxm9r) on
+// the doctor fix: it returns nil without running bd hooks install, and the
+// hooks directory is unchanged. With the key unset the fix goes on to run bd,
+// which a test binary refuses with ErrTestBinary.
+func TestGitHooksLeavesUnmanagedHooksAlone(t *testing.T) {
+	t.Setenv("BD_HOOKS_MANAGE", "")
+	if err := os.Unsetenv("BD_HOOKS_MANAGE"); err != nil {
+		t.Fatal(err)
+	}
+	repo := func(t *testing.T, configYAML string) string {
+		t.Helper()
+		dir := t.TempDir()
+		setupGitRepoInDir(t, dir)
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte(configYAML), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		hooksDir := filepath.Join(dir, ".git", "hooks")
+		if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(hooksDir, "pre-commit"), []byte("#!/bin/sh\necho mine\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+
+	unmanaged := repo(t, "hooks:\n  manage: false\n")
+	hook := filepath.Join(unmanaged, ".git", "hooks", "pre-commit")
+	if err := GitHooks(unmanaged); err != nil {
+		t.Fatalf("GitHooks under hooks.manage: false = %v, want nil (skipped)", err)
+	}
+	if got, err := os.ReadFile(hook); err != nil || string(got) != "#!/bin/sh\necho mine\n" {
+		t.Fatalf("pre-commit changed under hooks.manage: false (err %v):\n%s", err, got)
+	}
+
+	managed := repo(t, "issue-prefix: demo\n")
+	if err := GitHooks(managed); !errors.Is(err, ErrTestBinary) {
+		t.Fatalf("GitHooks with hooks.manage unset = %v, want it to reach bd (ErrTestBinary in a test)", err)
 	}
 }

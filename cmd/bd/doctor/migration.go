@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
 // PendingMigration represents a single pending migration
@@ -26,8 +28,10 @@ func DetectPendingMigrations(path string) []PendingMigration {
 		return pending
 	}
 
+	// hooks.manage: false means bd never migrates hooks here, so a migration
+	// is not pending: reporting one would only ask for a write bd refuses.
 	hookPlan, err := PlanHookMigration(path)
-	if err == nil && hookPlan.IsGitRepo && hookPlan.NeedsMigrationCount > 0 {
+	if err == nil && hookPlan.IsGitRepo && hookPlan.NeedsMigrationCount > 0 && config.HooksManaged(beadsDir) {
 		description := fmt.Sprintf("Git hook migration needed for %d hook(s)", hookPlan.NeedsMigrationCount)
 		command := "bd doctor --fix"
 		priority := 2

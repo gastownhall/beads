@@ -265,10 +265,10 @@ Three CLI-level differences are worth knowing up front:
 - IDs resolve exactly: an abbreviated id is not expanded (the wire has no
   substring search), and a missing id is reported as not found after one
   lookup.
-- `bd update -s closed` does not record `closed_by_session` (from `--session`
-  or `CLAUDE_SESSION_ID`), because the wire's update cannot carry it; the
-  close itself happens as usual. `bd close` does record the session. `bd
-  reopen`'s history entry carries the server's own label.
+- `bd update -s closed` does not record `closed_by_session` (from `--session`,
+  `CLAUDE_SESSION_ID` or `CLAUDE_CODE_SESSION_ID`), because the wire's update
+  cannot carry it; the close itself happens as usual. `bd close` does record
+  the session. `bd reopen`'s history entry carries the server's own label.
 - Contributor auto-routing (`routing.*` settings) is read from local
   `config.yaml` / environment only, never from the server's settings: its
   targets are local paths.
@@ -402,7 +402,14 @@ and a later sync could overwrite those edits with no conflict. If the failure
 is temporary, run the command again. If the error names another repository
 your beads link to and GitHub refuses the token for it (a 403), give the token
 read access to it. If the name is a former name of the configured repository,
-relinking those beads to their issues' current URLs also ends the lookup.
+relinking those beads to their issues' current URLs also ends the lookup. An
+issue transferred to another repository counts as that repository's: pull,
+push and conflict detection leave it and its bead alone, with a warning, as a
+push does for any bead linked outside the configured repository. Telling it
+from an issue of a renamed repository takes the repository's current name,
+which sync reads from GitHub first. If GitHub answers that request with a 404,
+push and conflict detection handle the issue as the configured repository's;
+any other failure stops the command, as above.
 
 ## 🌐 Community Tools
 

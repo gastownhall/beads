@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"slices"
 	"sort"
@@ -31,6 +32,10 @@ type RefScope struct {
 	// aliases holds the repository's other names (see withNames), each a
 	// lowercase "owner/repo"; empty when unknown.
 	aliases []string
+	// issueHost is the canonical host of the repository's own html_url, which
+	// its issue URLs use, when the scope knows it (see withIssueHost); an API
+	// proxy in front of github.com serves the API on another host.
+	issueHost string
 }
 
 // SubIssueLinkFromParentChild is retained for existing callers. Relationship
@@ -82,6 +87,18 @@ func (s RefScope) withNames(fullNames ...string) RefScope {
 	return s
 }
 
+// withIssueHost returns a copy of s that also serves the host of htmlURL, the
+// repository's own html_url as GitHub reports it, which its issue URLs use. An
+// API proxy in front of github.com answers on its own host, but the issues it
+// returns, and so the refs BuildExternalRef stores from them, name
+// github.com. An htmlURL with no host adds nothing.
+func (s RefScope) withIssueHost(htmlURL string) RefScope {
+	if host := hostFromURL(htmlURL); host != "" {
+		s.issueHost = host
+	}
+	return s
+}
+
 func hostFromURL(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -91,7 +108,19 @@ func hostFromURL(raw string) string {
 	if err != nil || u.Host == "" {
 		return ""
 	}
-	return strings.ToLower(u.Host)
+	return canonicalHost(u)
+}
+
+// canonicalHost returns u's host[:port] lower-cased, without a trailing dot
+// or the scheme's default port, so respellings of one host compare equal.
+func canonicalHost(u *url.URL) string {
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	switch port := u.Port(); {
+	case port == "", port == "443" && u.Scheme == "https", port == "80" && u.Scheme == "http":
+		return host
+	default:
+		return net.JoinHostPort(host, port)
+	}
 }
 
 // IssueNumberFromRef extracts a repository-scoped GitHub issue number from a
@@ -101,6 +130,10 @@ func hostFromURL(raw string) string {
 // repo-less "github:{digits}" shorthand that BuildExternalRef emits when no
 // URL is available is read as the configured repository. Everything else —
 // another repository, another host, a non-GitHub tracker URL — is rejected.
+// Host respellings still match: any letter case, a trailing dot, an explicit
+// default port, the web host's www. alias and a ref with no scheme, on the
+// configured hosts or the host of the repository's html_url when the scope
+// knows it (see withIssueHost).
 func (s RefScope) IssueNumberFromRef(ref string) (int, bool) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" || s.owner == "" || s.repo == "" {
@@ -138,14 +171,37 @@ func (s RefScope) otherRepository(ref string) (string, bool) {
 // owner and repository its path names, whichever repository that is, and the
 // issue number.
 func (s RefScope) issueURL(ref string) (owner, repo string, number int, ok bool) {
-	u, err := url.Parse(strings.TrimSpace(ref))
-	if err != nil || u.Host == "" {
-		return "", "", 0, false
-	}
-	if host := strings.ToLower(u.Host); host != s.apiHost && host != s.webHost {
+	u, ok := parseRefURL(ref)
+	if !ok || !s.servesHost(u) {
 		return "", "", 0, false
 	}
 	return splitIssueURLPath(u.Path)
+}
+
+// onHost reports whether ref is a URL on a host the scope serves, spelled any
+// way IssueNumberFromRef accepts, whichever repository it names.
+func (s RefScope) onHost(ref string) bool {
+	u, ok := parseRefURL(ref)
+	return ok && s.servesHost(u)
+}
+
+// servesHost reports whether u is on the scope's API host, its web host or
+// the host of the repository's html_url, or on either web host's www. alias.
+func (s RefScope) servesHost(u *url.URL) bool {
+	host := canonicalHost(u)
+	return host != "" && (host == s.apiHost || host == s.webHost || host == "www."+s.webHost ||
+		(s.issueHost != "" && (host == s.issueHost || host == "www."+s.issueHost)))
+}
+
+// parseRefURL parses ref as a URL with a host, reading a ref with no scheme
+// (github.com/{owner}/{repo}/issues/42) as https.
+func parseRefURL(ref string) (*url.URL, bool) {
+	ref = strings.TrimSpace(ref)
+	u, err := url.Parse(ref)
+	if err == nil && u.Scheme == "" && u.Host == "" {
+		u, err = url.Parse("https://" + ref)
+	}
+	return u, err == nil && u.Host != ""
 }
 
 // namesRepository reports whether owner/repo is the scope's repository, by

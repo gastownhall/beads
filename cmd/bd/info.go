@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
@@ -177,7 +178,9 @@ func renderInfo(info map[string]interface{}, schemaFlag bool, absDBPath string, 
 		}
 	}
 
-	if !suppressHookWarning {
+	// hooks.manage: false hides the warning as doctor.suppress.git-hooks does:
+	// it would only ask for an install bd will not do.
+	if !suppressHookWarning && config.HooksManaged("") {
 		hookStatuses := CheckGitHooks()
 		if warning := FormatHookWarnings(hookStatuses); warning != "" {
 			fmt.Printf("\n%s\n", warning)

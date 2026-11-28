@@ -86,6 +86,13 @@ var YamlOnlyKeys = map[string]bool{
 	"no-git-ops":      true, // Disable git ops in bd prime session close protocol (GH#593)
 	"agent.profile":   true, // Explicit policy profile for bd prime's close protocol (GH#3423)
 
+	// Per-repository opt-outs for git hook and .gitignore management. They
+	// are read from the workspace's files (config.HooksManaged and
+	// config.GitignoreManaged), often before or without a database, and they
+	// belong in the tracked file so every clone of the repository agrees.
+	HooksManageKey:     true,
+	GitignoreManageKey: true,
+
 	// Sync settings
 	"sync.remote":     true, // Primary: any Dolt-compatible remote URL
 	"sync.git-remote": true, // Deprecated: falls back from sync.remote
@@ -1891,6 +1898,12 @@ func validateYamlConfigValue(key, value string) error {
 		// The set viper's GetBool reads, so a stored value means what it says.
 		if _, err := strconv.ParseBool(value); err != nil {
 			return fmt.Errorf("prime.disabled must be true or false, got %q", value)
+		}
+	case HooksManageKey, GitignoreManageKey:
+		// manageSetting reads any other value as the default (true), so refuse
+		// it here rather than store an opt-out that does nothing.
+		if _, err := strconv.ParseBool(strings.TrimSpace(value)); err != nil {
+			return fmt.Errorf("%s must be true or false, got %q", key, value)
 		}
 	case "memories.budget-chars":
 		n, err := strconv.Atoi(value)

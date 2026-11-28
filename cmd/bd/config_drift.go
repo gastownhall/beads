@@ -95,8 +95,21 @@ func runDriftChecks() []DriftItem {
 	return items
 }
 
+// hooksNotManagedDriftMessage is the drift and apply message for a repository
+// that sets hooks.manage: false.
+const hooksNotManagedDriftMessage = "Git hooks not managed by bd (hooks.manage=false)"
+
 // checkHooksDrift checks whether git hooks are installed and current.
 func checkHooksDrift() []DriftItem {
+	// A repository that manages its own hooks has nothing for bd to compare.
+	if !config.HooksManaged("") {
+		return []DriftItem{{
+			Check:   "hooks",
+			Status:  driftStatusSkipped,
+			Message: hooksNotManagedDriftMessage,
+		}}
+	}
+
 	// Verify we're in a git repo first
 	_, err := git.GetGitHooksDir()
 	if err != nil {
